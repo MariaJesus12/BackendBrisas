@@ -1,0 +1,31 @@
+#para iniciar el proyecto del backend en la raiz del proyecto, con el nodemodule y los packagejson
+npm init -y
+
+#estas son dependencias necesarias para trabajar el backend 
+npm install express
+npm install cors
+npm install helmet
+npm install morgan
+npm install dotenv
+npm install bcrypt
+npm install jsonwebtoken
+
+#prisma
+npm install prisma
+npm install @prisma/client
+
+#typescript
+npm install -D typescript
+npm install -D ts-node-dev
+npm install -D @types/node
+npm install -D @types/express
+npm install -D @types/cors
+npm install -D @types/bcrypt
+npm install -D @types/jsonwebtoken
+npm install -D @types/morgan
+
+#Inicializar TypeScript
+npx tsc --init
+
+#Configurar Prisma
+npx prisma init
