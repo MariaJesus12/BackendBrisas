@@ -10,22 +10,6 @@ npm install dotenv
 npm install bcrypt
 npm install jsonwebtoken
 
-#prisma
-npm install prisma
-npm install @prisma/client
-
-#typescript
-npm install -D typescript
-npm install -D ts-node-dev
-npm install -D @types/node
-npm install -D @types/express
-npm install -D @types/cors
-npm install -D @types/bcrypt
-npm install -D @types/jsonwebtoken
-npm install -D @types/morgan
-
-#Inicializar TypeScript
-npx tsc --init
-
-#Configurar Prisma
-npx prisma init
+#desarrollo en JavaScript
+# para modo desarrollo con recarga en caliente se usa:
+npm run dev
