@@ -5,7 +5,11 @@ const morgan = require("morgan");
 
 const { env } = require("./config/env");
 const { pool } = require("./config/database");
+const announcementRouter = require("./routes/announcement.routes");
 const authRouter = require("./auth");
+const categoryRouter = require("./routes/category.routes");
+const dishOfMonthRouter = require("./routes/dish-of-month.routes");
+const productRouter = require("./routes/product.routes");
 const roleRouter = require("./routes/role.routes");
 const userRouter = require("./routes/user.routes");
 
@@ -23,6 +27,10 @@ app.use(morgan("dev"));
 app.use(express.json());
 
 app.use("/api/auth", authRouter);
+app.use("/api/announcements", announcementRouter);
+app.use("/api/categories", categoryRouter);
+app.use("/api/dish-of-month", dishOfMonthRouter);
+app.use("/api/products", productRouter);
 app.use("/api/roles", roleRouter);
 app.use("/api/users", userRouter);
 
