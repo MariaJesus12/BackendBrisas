@@ -42,9 +42,7 @@ async function listCurrentAnnouncements() {
     FROM anuncios a
     INNER JOIN usuarios u ON u.id = a.usuario_id
     WHERE a.activo = 1
-      AND CURDATE() BETWEEN a.fecha_inicio AND a.fecha_fin
-      AND CURTIME() BETWEEN a.hora_inicio AND a.hora_fin
-    ORDER BY a.prioridad DESC, a.id DESC
+    ORDER BY a.prioridad DESC, a.created_at DESC, a.id DESC
     `,
   );
 

@@ -111,6 +111,48 @@ async function createUser({ nombre, usuario, passwordHash, rolId, activo }) {
   return result.insertId;
 }
 
+async function updateUser(userId, { nombre, usuario, passwordHash, rolId, activo }) {
+  const setClauses = [
+    "nombre = ?",
+    "usuario = ?",
+    "rol_id = ?",
+    "activo = ?",
+    "updated_at = NOW()",
+  ];
+  const params = [nombre, usuario, rolId, activo];
+
+  if (passwordHash) {
+    setClauses.splice(2, 0, "password = ?");
+    params.splice(2, 0, passwordHash);
+  }
+
+  params.push(userId);
+
+  const result = await query(
+    `
+    UPDATE usuarios
+    SET ${setClauses.join(", ")}
+    WHERE id = ?
+    `,
+    params,
+  );
+
+  return result.affectedRows;
+}
+
+async function softDeleteUser(userId) {
+  const result = await query(
+    `
+    UPDATE usuarios
+    SET activo = 0, updated_at = NOW()
+    WHERE id = ?
+    `,
+    [userId],
+  );
+
+  return result.affectedRows;
+}
+
 async function findUserById(userId) {
   const rows = await query(
     `
@@ -175,4 +217,6 @@ module.exports = {
   updateLastActivity,
   expireSessionByUserId,
   createUser,
+  updateUser,
+  softDeleteUser,
 };
