@@ -1,5 +1,11 @@
 const { findMesaById } = require("../models/mesa.model");
 const {
+  countActiveQueueJobsByPedidoAndTipo,
+  createColaImpresion,
+  findActiveImpresoraByTipo,
+  findColaImpresionById,
+} = require("../models/impresion.model");
+const {
   createDetallePedido,
   createPago,
   createPedido,
@@ -54,6 +60,120 @@ function parseDateTime(value) {
   }
 
   return date;
+}
+
+function formatDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = date.getFullYear();
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+
+  return `${day}/${month}/${year} ${hour}:${minute}`;
+}
+
+function formatMoney(value) {
+  return roundMoney(value).toFixed(2);
+}
+
+function getPedidoDestinoLabel(pedido) {
+  if (pedido.tipo === "MESA") {
+    return `MESA ${pedido.mesaNumero || pedido.mesaId}`;
+  }
+
+  return "PARA LLEVAR";
+}
+
+function buildKitchenTicket(pedido) {
+  const lines = [
+    "**************",
+    "COMANDA COCINA",
+    getPedidoDestinoLabel(pedido),
+    `Pedido: ${pedido.codigo}`,
+    `Atiende: ${pedido.usuarioNombre || `Usuario ${pedido.usuarioId}`}`,
+    `Hora: ${formatDateTime(new Date())}`,
+    "",
+  ];
+
+  for (const detail of pedido.detalles) {
+    lines.push(`${detail.cantidad} x ${detail.productoNombre}`);
+
+    if (detail.observacion) {
+      lines.push(`OBS: ${detail.observacion}`);
+    }
+  }
+
+  lines.push("**************");
+
+  return lines.join("\n");
+}
+
+function buildInvoiceTicket(pedido) {
+  const lines = [
+    "**************",
+    "FACTURA",
+    getPedidoDestinoLabel(pedido),
+    `Pedido: ${pedido.codigo}`,
+    `Fecha: ${formatDateTime(new Date())}`,
+    "",
+  ];
+
+  for (const detail of pedido.detalles) {
+    lines.push(`${detail.cantidad} x ${detail.productoNombre}`);
+    lines.push(`  ${formatMoney(detail.precioUnitario)} = ${formatMoney(detail.subtotal)}`);
+
+    if (detail.observacion) {
+      lines.push(`  OBS: ${detail.observacion}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(`Subtotal: ${formatMoney(pedido.subtotal)}`);
+  lines.push(`IVA: ${formatMoney(pedido.impuesto)}`);
+  lines.push(`TOTAL: ${formatMoney(pedido.total)}`);
+  lines.push("Gracias por su visita");
+  lines.push("**************");
+
+  return lines.join("\n");
+}
+
+async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copias = 1 }, connection) {
+  const printer = await findActiveImpresoraByTipo(tipo, connection);
+  if (!printer) {
+    throw appError(409, `No hay una impresora activa configurada para ${tipo}`);
+  }
+
+  const activeJobs = await countActiveQueueJobsByPedidoAndTipo(pedido.id, tipo, connection);
+  if (activeJobs > 0) {
+    throw appError(409, `Ya existe una impresion ${tipo} pendiente o en proceso para este pedido`);
+  }
+
+  const contenido = tipo === "COCINA" ? buildKitchenTicket(pedido) : buildInvoiceTicket(pedido);
+
+  const jobId = await createColaImpresion(
+    {
+      pedidoId: pedido.id,
+      impresoraId: printer.id,
+      usuarioId,
+      tipo,
+      contenido,
+      estado: "PENDIENTE",
+      intentos: 0,
+      mensajeError: null,
+      reimpresion,
+      copias,
+      fechaImpresion: null,
+    },
+    connection,
+  );
+
+  return jobId;
 }
 
 function parsePedidoCreateInput(body, authUser) {
@@ -1065,6 +1185,343 @@ async function listPaymentMethodsHandler(_req, res) {
   res.json({ methods });
 }
 
+async function sendPedidoToKitchenHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const existingPedido = await hydratePedido(pedidoId);
+  if (!existingPedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  if (["CANCELADO", "CERRADO", "FACTURADO"].includes(existingPedido.estado)) {
+    res.status(409).json({ message: "El pedido no puede enviarse a cocina en su estado actual" });
+    return;
+  }
+
+  if (!existingPedido.detalles.length) {
+    res.status(409).json({ message: "El pedido no tiene detalles para imprimir en cocina" });
+    return;
+  }
+
+  const body = req.body || {};
+  const copias = body.copias == null ? 1 : Number(body.copias);
+
+  if (!Number.isInteger(copias) || copias <= 0) {
+    res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const pedidoState = await findPedidoById(pedidoId);
+    const nextState = pedidoState.estado === "BORRADOR" ? "COCINA" : pedidoState.estado;
+
+    if (nextState !== pedidoState.estado) {
+      await updatePedido(
+        pedidoId,
+        {
+          codigo: pedidoState.codigo,
+          mesaId: pedidoState.mesaId,
+          usuarioId: pedidoState.usuarioId,
+          tipo: pedidoState.tipo,
+          estado: nextState,
+          subtotal: pedidoState.subtotal,
+          impuesto: pedidoState.impuesto,
+          total: pedidoState.total,
+          fechaApertura: pedidoState.fechaApertura,
+          fechaCierre: pedidoState.fechaCierre,
+        },
+        connection,
+      );
+    }
+
+    const jobId = await queuePedidoPrint(
+      {
+        pedido: {
+          ...existingPedido,
+          estado: nextState,
+        },
+        tipo: "COCINA",
+        usuarioId: req.authUser.id,
+        reimpresion: existingPedido.estado === "COCINA" ? 1 : 0,
+        copias,
+      },
+      connection,
+    );
+
+    await connection.commit();
+
+    const pedido = await hydratePedido(pedidoId);
+    const printJob = await findColaImpresionById(jobId);
+
+    res.json({
+      message: "Pedido enviado a cocina exitosamente",
+      pedido,
+      printJob,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function facturarPedidoHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const existingPedido = await hydratePedido(pedidoId);
+  if (!existingPedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  if (["CANCELADO", "CERRADO"].includes(existingPedido.estado)) {
+    res.status(409).json({ message: "El pedido no puede facturarse en su estado actual" });
+    return;
+  }
+
+  if (!existingPedido.detalles.length) {
+    res.status(409).json({ message: "El pedido no tiene detalles para facturar" });
+    return;
+  }
+
+  const body = req.body || {};
+  const copias = body.copias == null ? 1 : Number(body.copias);
+
+  if (!Number.isInteger(copias) || copias <= 0) {
+    res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const pedidoState = await findPedidoById(pedidoId);
+    const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
+    const impuesto = roundMoney(pedidoState.impuesto);
+    const total = roundMoney(subtotal + impuesto);
+
+    await updatePedidoTotals(
+      pedidoId,
+      {
+        subtotal,
+        impuesto,
+        total,
+      },
+      connection,
+    );
+
+    await updatePedido(
+      pedidoId,
+      {
+        codigo: pedidoState.codigo,
+        mesaId: pedidoState.mesaId,
+        usuarioId: pedidoState.usuarioId,
+        tipo: pedidoState.tipo,
+        estado: "FACTURADO",
+        subtotal,
+        impuesto,
+        total,
+        fechaApertura: pedidoState.fechaApertura,
+        fechaCierre: pedidoState.fechaCierre,
+      },
+      connection,
+    );
+
+    const pedidoToPrint = {
+      ...existingPedido,
+      estado: "FACTURADO",
+      subtotal,
+      impuesto,
+      total,
+    };
+
+    const jobId = await queuePedidoPrint(
+      {
+        pedido: pedidoToPrint,
+        tipo: "FACTURA",
+        usuarioId: req.authUser.id,
+        reimpresion: existingPedido.estado === "FACTURADO" ? 1 : 0,
+        copias,
+      },
+      connection,
+    );
+
+    await connection.commit();
+
+    const pedido = await hydratePedido(pedidoId);
+    const printJob = await findColaImpresionById(jobId);
+
+    res.json({
+      message: "Pedido facturado y enviado a impresion exitosamente",
+      pedido,
+      printJob,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function reprintPedidoKitchenHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const pedido = await hydratePedido(pedidoId);
+  if (!pedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  if (!pedido.detalles.length) {
+    res.status(409).json({ message: "El pedido no tiene detalles para reimprimir" });
+    return;
+  }
+
+  const body = req.body || {};
+  const copias = body.copias == null ? 1 : Number(body.copias);
+
+  if (!Number.isInteger(copias) || copias <= 0) {
+    res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const jobId = await queuePedidoPrint(
+      {
+        pedido,
+        tipo: "COCINA",
+        usuarioId: req.authUser.id,
+        reimpresion: 1,
+        copias,
+      },
+      connection,
+    );
+
+    await connection.commit();
+
+    const printJob = await findColaImpresionById(jobId);
+
+    res.status(201).json({
+      message: "Reimpresion de cocina encolada exitosamente",
+      pedido,
+      printJob,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function reprintPedidoFacturaHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const pedido = await hydratePedido(pedidoId);
+  if (!pedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  if (!pedido.detalles.length) {
+    res.status(409).json({ message: "El pedido no tiene detalles para reimprimir" });
+    return;
+  }
+
+  const body = req.body || {};
+  const copias = body.copias == null ? 1 : Number(body.copias);
+
+  if (!Number.isInteger(copias) || copias <= 0) {
+    res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const jobId = await queuePedidoPrint(
+      {
+        pedido,
+        tipo: "FACTURA",
+        usuarioId: req.authUser.id,
+        reimpresion: 1,
+        copias,
+      },
+      connection,
+    );
+
+    await connection.commit();
+
+    const printJob = await findColaImpresionById(jobId);
+
+    res.status(201).json({
+      message: "Reimpresion de factura encolada exitosamente",
+      pedido,
+      printJob,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 module.exports = {
   listPedidosHandler,
   getPedidoByIdHandler,
@@ -1080,4 +1537,8 @@ module.exports = {
   updatePedidoPaymentHandler,
   deletePedidoPaymentHandler,
   listPaymentMethodsHandler,
+  sendPedidoToKitchenHandler,
+  facturarPedidoHandler,
+  reprintPedidoKitchenHandler,
+  reprintPedidoFacturaHandler,
 };

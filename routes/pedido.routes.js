@@ -7,11 +7,15 @@ const {
   deletePedidoDetailHandler,
   deletePedidoHandler,
   deletePedidoPaymentHandler,
+  facturarPedidoHandler,
   getPedidoByIdHandler,
   listPaymentMethodsHandler,
   listPedidoDetailsHandler,
   listPedidoPaymentsHandler,
   listPedidosHandler,
+  reprintPedidoFacturaHandler,
+  reprintPedidoKitchenHandler,
+  sendPedidoToKitchenHandler,
   updatePedidoDetailHandler,
   updatePedidoHandler,
   updatePedidoPaymentHandler,
@@ -27,6 +31,10 @@ pedidoRouter.get("/payment-methods", listPaymentMethodsHandler);
 pedidoRouter.get("/", listPedidosHandler);
 pedidoRouter.get("/:id", getPedidoByIdHandler);
 pedidoRouter.post("/", createPedidoHandler);
+pedidoRouter.post("/:id/enviar-cocina", sendPedidoToKitchenHandler);
+pedidoRouter.post("/:id/facturar", facturarPedidoHandler);
+pedidoRouter.post("/:id/reimprimir-cocina", reprintPedidoKitchenHandler);
+pedidoRouter.post("/:id/reimprimir-factura", reprintPedidoFacturaHandler);
 pedidoRouter.put("/:id", updatePedidoHandler);
 pedidoRouter.delete("/:id", deletePedidoHandler);
 
