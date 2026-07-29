@@ -173,6 +173,57 @@ async function findPedidoByCode(codigo) {
   return rows[0] || null;
 }
 
+async function getNextPedidoCodeForDate(fechaApertura, connection) {
+  const baseDate = fechaApertura instanceof Date ? fechaApertura : new Date(fechaApertura || Date.now());
+
+  if (Number.isNaN(baseDate.getTime())) {
+    throw new Error("fechaApertura invalida para generar codigo de pedido");
+  }
+
+  const year = baseDate.getFullYear();
+  const month = String(baseDate.getMonth() + 1).padStart(2, "0");
+  const day = String(baseDate.getDate()).padStart(2, "0");
+  const datePrefix = `${year}${month}${day}`;
+
+  const lockName = `pedido_code_${datePrefix}`;
+
+  const lockRows = await run("SELECT GET_LOCK(?, 5) AS locked", [lockName], connection);
+  if (Number(lockRows[0]?.locked || 0) !== 1) {
+    throw new Error("No se pudo bloquear la generacion del codigo de pedido");
+  }
+
+  try {
+    const rows = await run(
+      `
+      SELECT codigo
+      FROM pedidos
+      WHERE DATE(fecha_apertura) = DATE(?)
+      ORDER BY id DESC
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [baseDate],
+      connection,
+    );
+
+    const lastCode = String(rows[0]?.codigo || "").trim();
+    let nextSequence = 1;
+
+    if (lastCode.startsWith(datePrefix)) {
+      const suffix = lastCode.slice(datePrefix.length);
+      const parsedSuffix = Number(suffix);
+
+      if (Number.isInteger(parsedSuffix) && parsedSuffix > 0) {
+        nextSequence = parsedSuffix + 1;
+      }
+    }
+
+    return `${datePrefix}${String(nextSequence).padStart(2, "0")}`;
+  } finally {
+    await run("SELECT RELEASE_LOCK(?)", [lockName], connection);
+  }
+}
+
 async function createPedido(
   { codigo, mesaId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre },
   connection,
@@ -506,6 +557,7 @@ module.exports = {
   listPedidos,
   findPedidoById,
   findPedidoByCode,
+  getNextPedidoCodeForDate,
   createPedido,
   updatePedido,
   deletePedidoCascade,

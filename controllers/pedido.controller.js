@@ -15,8 +15,8 @@ const {
   findDetalleByIdAndPedido,
   findMetodoPagoById,
   findPagoByIdAndPedido,
-  findPedidoByCode,
   findPedidoById,
+  getNextPedidoCodeForDate,
   listDetalleByPedidoId,
   listMetodosPago,
   listPagosByPedidoId,
@@ -181,7 +181,7 @@ function parsePedidoCreateInput(body, authUser) {
   const usuarioRaw = body.usuarioId ?? body.usuario_id ?? authUser?.id;
 
   return {
-    codigo: body.codigo == null ? "" : String(body.codigo).trim(),
+    codigo: "",
     mesaId: mesaRaw == null || mesaRaw === "" ? null : Number(mesaRaw),
     usuarioId: Number(usuarioRaw),
     tipo: normalizeUpper(body.tipo),
@@ -207,9 +207,7 @@ function parsePedidoUpdateInput(body, existingPedido) {
   const usuarioRaw = hasUsuarioId ? body.usuarioId : hasUsuarioIdAlias ? body.usuario_id : existingPedido.usuarioId;
 
   return {
-    codigo: Object.prototype.hasOwnProperty.call(body, "codigo")
-      ? String(body.codigo || "").trim()
-      : existingPedido.codigo,
+    codigo: existingPedido.codigo,
     mesaId: mesaRaw == null || mesaRaw === "" ? null : Number(mesaRaw),
     usuarioId: Number(usuarioRaw),
     tipo: Object.prototype.hasOwnProperty.call(body, "tipo") ? normalizeUpper(body.tipo) : existingPedido.tipo,
@@ -383,30 +381,6 @@ function validatePagoInput(pago) {
   return { ok: true };
 }
 
-async function generatePedidoCode() {
-  for (let i = 0; i < 5; i += 1) {
-    const now = new Date();
-    const base = [
-      now.getFullYear(),
-      String(now.getMonth() + 1).padStart(2, "0"),
-      String(now.getDate()).padStart(2, "0"),
-      String(now.getHours()).padStart(2, "0"),
-      String(now.getMinutes()).padStart(2, "0"),
-      String(now.getSeconds()).padStart(2, "0"),
-    ].join("");
-
-    const random = String(Math.floor(Math.random() * 1000)).padStart(3, "0");
-    const code = `PED-${base}-${random}`;
-
-    const existing = await findPedidoByCode(code);
-    if (!existing) {
-      return code;
-    }
-  }
-
-  throw appError(500, "No se pudo generar un codigo de pedido unico");
-}
-
 async function hydratePedido(pedidoId) {
   const pedido = await findPedidoById(pedidoId);
   if (!pedido) return null;
@@ -508,16 +482,6 @@ async function createPedidoHandler(req, res) {
     return;
   }
 
-  if (input.codigo) {
-    const duplicatedByCode = await findPedidoByCode(input.codigo);
-    if (duplicatedByCode) {
-      res.status(409).json({ message: "Ya existe un pedido con ese codigo" });
-      return;
-    }
-  } else {
-    input.codigo = await generatePedidoCode();
-  }
-
   const normalizedDetalles = [];
   for (const rawDetalle of input.detalles) {
     const parsedDetalle = parseDetalleInput(rawDetalle || {});
@@ -539,9 +503,12 @@ async function createPedidoHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    const fechaApertura = input.fechaApertura || new Date();
+    const generatedCode = await getNextPedidoCodeForDate(fechaApertura, connection);
+
     const pedidoId = await createPedido(
       {
-        codigo: input.codigo,
+        codigo: generatedCode,
         mesaId: input.mesaId,
         usuarioId: input.usuarioId,
         tipo: input.tipo,
@@ -549,7 +516,7 @@ async function createPedidoHandler(req, res) {
         subtotal: 0,
         impuesto: roundMoney(input.impuesto),
         total: roundMoney(input.impuesto),
-        fechaApertura: input.fechaApertura,
+        fechaApertura,
         fechaCierre: input.estado === "CERRADO" ? input.fechaCierre || new Date() : input.fechaCierre,
       },
       connection,
@@ -649,12 +616,6 @@ async function updatePedidoHandler(req, res) {
   const user = await findUserById(input.usuarioId);
   if (!user || !user.activo) {
     res.status(400).json({ message: "usuarioId invalido o usuario inactivo" });
-    return;
-  }
-
-  const duplicatedByCode = await findPedidoByCode(input.codigo);
-  if (duplicatedByCode && duplicatedByCode.id !== pedidoId) {
-    res.status(409).json({ message: "Ya existe otro pedido con ese codigo" });
     return;
   }
 
