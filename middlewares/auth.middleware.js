@@ -71,6 +71,30 @@ async function requireAuth(req, res, next) {
   }
 }
 
+function normalizeRoleName(roleName) {
+  const raw = String(roleName ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+
+  const cleaned = raw.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+  const aliases = {
+    ADMIN: ["ADMIN", "ADMINISTRADOR", "ADMINISTRACION", "ADMINISTRATIVO"],
+    MESERO: ["MESERO", "MESEROS"],
+    CAJERO: ["CAJERO", "CAJEROS"],
+  };
+
+  for (const [canonical, values] of Object.entries(aliases)) {
+    if (values.includes(cleaned)) {
+      return canonical;
+    }
+  }
+
+  return cleaned;
+}
+
 function requireRoles(...allowedRoles) {
   return (req, res, next) => {
     if (!req.authUser) {
@@ -78,11 +102,15 @@ function requireRoles(...allowedRoles) {
       return;
     }
 
-    if (!allowedRoles.includes(req.authUser.rolNombre)) {
+    const normalizedUserRole = normalizeRoleName(req.authUser.rolNombre);
+    const normalizedAllowedRoles = allowedRoles.map(normalizeRoleName);
+
+    if (!normalizedAllowedRoles.includes(normalizedUserRole)) {
       res.status(403).json({ message: "No autorizado para este recurso" });
       return;
     }
 
+    req.authUser.rolNombre = normalizedUserRole;
     next();
   };
 }

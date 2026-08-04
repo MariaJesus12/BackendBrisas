@@ -14,6 +14,8 @@ const mesaRouter = require("./routes/mesa.routes");
 const pedidoRouter = require("./routes/pedido.routes");
 const productRouter = require("./routes/product.routes");
 const roleRouter = require("./routes/role.routes");
+const tipoCambioRouter = require("./routes/tipo-cambio.routes");
+const monedaRouter = require("./routes/moneda.routes");
 const userRouter = require("./routes/user.routes");
 
 const app = express();
@@ -38,6 +40,8 @@ app.use("/api/mesas", mesaRouter);
 app.use("/api/pedidos", pedidoRouter);
 app.use("/api/products", productRouter);
 app.use("/api/roles", roleRouter);
+app.use("/api/tipo-cambio", tipoCambioRouter);
+app.use("/api/monedas", monedaRouter);
 app.use("/api/users", userRouter);
 
 app.get("/health", (_req, res) => {
