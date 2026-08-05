@@ -42,7 +42,23 @@ async function findMonedaById(monedaId) {
   return row ? toMoneda(row) : null;
 }
 
+async function findMonedaByCode(codigo) {
+  const rows = await query(
+    `
+    SELECT id, codigo, nombre, simbolo, activa, created_at, updated_at
+    FROM monedas
+    WHERE UPPER(codigo) = UPPER(?)
+    LIMIT 1
+    `,
+    [codigo],
+  );
+
+  const row = rows[0];
+  return row ? toMoneda(row) : null;
+}
+
 module.exports = {
   listMonedas,
   findMonedaById,
+  findMonedaByCode,
 };

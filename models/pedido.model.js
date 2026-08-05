@@ -1,5 +1,7 @@
 const { pool, query } = require("../config/database");
 
+let schemaCapabilitiesCache = null;
+
 function toMoney(value) {
   return Number(value || 0);
 }
@@ -26,6 +28,7 @@ function toDetalle(row) {
   return {
     id: row.id,
     pedidoId: row.pedido_id,
+    cuentaPedidoId: row.cuenta_pedido_id,
     productoId: row.producto_id,
     productoCodigo: row.producto_codigo,
     productoNombre: row.producto_nombre,
@@ -43,7 +46,15 @@ function toPago(row) {
     pedidoId: row.pedido_id,
     metodoPagoId: row.metodo_pago_id,
     metodoPagoNombre: row.metodo_pago_nombre,
+    monedaId: row.moneda_id,
+    monedaCodigo: row.moneda_codigo,
+    monedaSimbolo: row.moneda_simbolo,
+    tipoCambioId: row.tipo_cambio_id,
     monto: toMoney(row.monto),
+    montoRecibido: toMoney(row.monto_recibido),
+    vuelto: toMoney(row.vuelto),
+    tipoCambioUtilizado: Number(row.tipo_cambio_utilizado || 0),
+    montoMoneda: toMoney(row.monto_moneda),
     referencia: row.referencia,
     fecha: row.fecha,
   };
@@ -56,6 +67,21 @@ function toMetodoPago(row) {
   };
 }
 
+function toCuentaPedido(row) {
+  return {
+    id: row.id,
+    pedidoId: row.pedido_id,
+    numeroCuenta: row.numero_cuenta,
+    subtotal: toMoney(row.subtotal),
+    impuesto: toMoney(row.impuesto),
+    descuento: toMoney(row.descuento),
+    total: toMoney(row.total),
+    estado: row.estado,
+    fechaCreacion: row.fecha_creacion,
+    fechaActualizacion: row.fecha_actualizacion,
+  };
+}
+
 async function run(sql, params = [], connection) {
   if (connection) {
     const [rows] = await connection.query(sql, params);
@@ -63,6 +89,53 @@ async function run(sql, params = [], connection) {
   }
 
   return query(sql, params);
+}
+
+async function getSchemaCapabilities(connection) {
+  if (schemaCapabilitiesCache) {
+    return schemaCapabilitiesCache;
+  }
+
+  const columnRows = await run(
+    `
+    SELECT TABLE_NAME, COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME IN ('detalle_pedido', 'pagos', 'cuentas_pedido')
+    `,
+    [],
+    connection,
+  );
+
+  const tableRows = await run(
+    `
+    SELECT TABLE_NAME
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME IN ('monedas', 'tipo_cambio', 'cuentas_pedido')
+    `,
+    [],
+    connection,
+  );
+
+  const hasColumn = (tableName, columnName) =>
+    columnRows.some((row) => row.TABLE_NAME === tableName && row.COLUMN_NAME === columnName);
+  const hasTable = (tableName) => tableRows.some((row) => row.TABLE_NAME === tableName);
+
+  schemaCapabilitiesCache = {
+    hasDetalleCuentaPedidoId: hasColumn("detalle_pedido", "cuenta_pedido_id"),
+    hasCuentasPedidoTable: hasTable("cuentas_pedido"),
+    hasPagosMonedaColumns:
+      hasColumn("pagos", "moneda_id") &&
+      hasColumn("pagos", "tipo_cambio_id") &&
+      hasColumn("pagos", "monto_recibido") &&
+      hasColumn("pagos", "vuelto") &&
+      hasColumn("pagos", "tipo_cambio_utilizado") &&
+      hasColumn("pagos", "monto_moneda"),
+    hasMonedasTable: hasTable("monedas"),
+  };
+
+  return schemaCapabilitiesCache;
 }
 
 async function listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaHasta } = {}) {
@@ -287,6 +360,15 @@ async function deletePedidoCascade(pedidoId, connection) {
     connection,
   );
 
+  await run(
+    `
+    DELETE FROM cuentas_pedido
+    WHERE pedido_id = ?
+    `,
+    [pedidoId],
+    connection,
+  );
+
   const result = await run(
     `
     DELETE FROM pedidos
@@ -300,11 +382,15 @@ async function deletePedidoCascade(pedidoId, connection) {
 }
 
 async function listDetalleByPedidoId(pedidoId) {
+  const schema = await getSchemaCapabilities();
+  const cuentaPedidoColumn = schema.hasDetalleCuentaPedidoId ? "d.cuenta_pedido_id" : "NULL AS cuenta_pedido_id";
+
   const rows = await query(
     `
     SELECT
       d.id,
       d.pedido_id,
+      ${cuentaPedidoColumn},
       d.producto_id,
       p.codigo AS producto_codigo,
       p.nombre AS producto_nombre,
@@ -325,11 +411,15 @@ async function listDetalleByPedidoId(pedidoId) {
 }
 
 async function findDetalleByIdAndPedido(detalleId, pedidoId) {
+  const schema = await getSchemaCapabilities();
+  const cuentaPedidoColumn = schema.hasDetalleCuentaPedidoId ? "d.cuenta_pedido_id" : "NULL AS cuenta_pedido_id";
+
   const rows = await query(
     `
     SELECT
       d.id,
       d.pedido_id,
+      ${cuentaPedidoColumn},
       d.producto_id,
       p.codigo AS producto_codigo,
       p.nombre AS producto_nombre,
@@ -351,26 +441,65 @@ async function findDetalleByIdAndPedido(detalleId, pedidoId) {
 }
 
 async function createDetallePedido(
-  { pedidoId, productoId, cantidad, precioUnitario, subtotal, observacion },
+  { pedidoId, cuentaPedidoId = null, productoId, cantidad, precioUnitario, subtotal, observacion },
   connection,
 ) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasDetalleCuentaPedidoId) {
+    const legacyResult = await run(
+      `
+      INSERT INTO detalle_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, observacion, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, NOW())
+      `,
+      [pedidoId, productoId, cantidad, precioUnitario, subtotal, observacion],
+      connection,
+    );
+
+    return legacyResult.insertId;
+  }
+
   const result = await run(
     `
-    INSERT INTO detalle_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, observacion, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, NOW())
+    INSERT INTO detalle_pedido (pedido_id, cuenta_pedido_id, producto_id, cantidad, precio_unitario, subtotal, observacion, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
     `,
-    [pedidoId, productoId, cantidad, precioUnitario, subtotal, observacion],
+    [pedidoId, cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion],
     connection,
   );
 
   return result.insertId;
 }
 
-async function updateDetallePedido(detalleId, { productoId, cantidad, precioUnitario, subtotal, observacion }, connection) {
+async function updateDetallePedido(
+  detalleId,
+  { cuentaPedidoId = null, productoId, cantidad, precioUnitario, subtotal, observacion },
+  connection,
+) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasDetalleCuentaPedidoId) {
+    const legacyResult = await run(
+      `
+      UPDATE detalle_pedido
+      SET
+        producto_id = ?,
+        cantidad = ?,
+        precio_unitario = ?,
+        subtotal = ?,
+        observacion = ?
+      WHERE id = ?
+      `,
+      [productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
+      connection,
+    );
+
+    return legacyResult.affectedRows;
+  }
+
   const result = await run(
     `
     UPDATE detalle_pedido
     SET
+      cuenta_pedido_id = ?,
       producto_id = ?,
       cantidad = ?,
       precio_unitario = ?,
@@ -378,7 +507,7 @@ async function updateDetallePedido(detalleId, { productoId, cantidad, precioUnit
       observacion = ?
     WHERE id = ?
     `,
-    [productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
+    [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
     connection,
   );
 
@@ -427,6 +556,38 @@ async function updatePedidoTotals(pedidoId, { subtotal, impuesto, total }, conne
 }
 
 async function listPagosByPedidoId(pedidoId) {
+  const schema = await getSchemaCapabilities();
+
+  if (!schema.hasPagosMonedaColumns || !schema.hasMonedasTable) {
+    const legacyRows = await query(
+      `
+      SELECT
+        pg.id,
+        pg.pedido_id,
+        pg.metodo_pago_id,
+        mp.nombre AS metodo_pago_nombre,
+        NULL AS moneda_id,
+        NULL AS moneda_codigo,
+        NULL AS moneda_simbolo,
+        NULL AS tipo_cambio_id,
+        pg.monto,
+        pg.monto AS monto_recibido,
+        0 AS vuelto,
+        1 AS tipo_cambio_utilizado,
+        pg.monto AS monto_moneda,
+        pg.referencia,
+        pg.fecha
+      FROM pagos pg
+      INNER JOIN metodos_pago mp ON mp.id = pg.metodo_pago_id
+      WHERE pg.pedido_id = ?
+      ORDER BY pg.id ASC
+      `,
+      [pedidoId],
+    );
+
+    return legacyRows.map(toPago);
+  }
+
   const rows = await query(
     `
     SELECT
@@ -434,11 +595,20 @@ async function listPagosByPedidoId(pedidoId) {
       pg.pedido_id,
       pg.metodo_pago_id,
       mp.nombre AS metodo_pago_nombre,
+      pg.moneda_id,
+      mo.codigo AS moneda_codigo,
+      mo.simbolo AS moneda_simbolo,
+      pg.tipo_cambio_id,
       pg.monto,
+      pg.monto_recibido,
+      pg.vuelto,
+      pg.tipo_cambio_utilizado,
+      pg.monto_moneda,
       pg.referencia,
       pg.fecha
     FROM pagos pg
     INNER JOIN metodos_pago mp ON mp.id = pg.metodo_pago_id
+    INNER JOIN monedas mo ON mo.id = pg.moneda_id
     WHERE pg.pedido_id = ?
     ORDER BY pg.id ASC
     `,
@@ -449,6 +619,39 @@ async function listPagosByPedidoId(pedidoId) {
 }
 
 async function findPagoByIdAndPedido(pagoId, pedidoId) {
+  const schema = await getSchemaCapabilities();
+
+  if (!schema.hasPagosMonedaColumns || !schema.hasMonedasTable) {
+    const legacyRows = await query(
+      `
+      SELECT
+        pg.id,
+        pg.pedido_id,
+        pg.metodo_pago_id,
+        mp.nombre AS metodo_pago_nombre,
+        NULL AS moneda_id,
+        NULL AS moneda_codigo,
+        NULL AS moneda_simbolo,
+        NULL AS tipo_cambio_id,
+        pg.monto,
+        pg.monto AS monto_recibido,
+        0 AS vuelto,
+        1 AS tipo_cambio_utilizado,
+        pg.monto AS monto_moneda,
+        pg.referencia,
+        pg.fecha
+      FROM pagos pg
+      INNER JOIN metodos_pago mp ON mp.id = pg.metodo_pago_id
+      WHERE pg.id = ? AND pg.pedido_id = ?
+      LIMIT 1
+      `,
+      [pagoId, pedidoId],
+    );
+
+    const legacyRow = legacyRows[0];
+    return legacyRow ? toPago(legacyRow) : null;
+  }
+
   const rows = await query(
     `
     SELECT
@@ -456,11 +659,20 @@ async function findPagoByIdAndPedido(pagoId, pedidoId) {
       pg.pedido_id,
       pg.metodo_pago_id,
       mp.nombre AS metodo_pago_nombre,
+      pg.moneda_id,
+      mo.codigo AS moneda_codigo,
+      mo.simbolo AS moneda_simbolo,
+      pg.tipo_cambio_id,
       pg.monto,
+      pg.monto_recibido,
+      pg.vuelto,
+      pg.tipo_cambio_utilizado,
+      pg.monto_moneda,
       pg.referencia,
       pg.fecha
     FROM pagos pg
     INNER JOIN metodos_pago mp ON mp.id = pg.metodo_pago_id
+    INNER JOIN monedas mo ON mo.id = pg.moneda_id
     WHERE pg.id = ? AND pg.pedido_id = ?
     LIMIT 1
     `,
@@ -471,27 +683,108 @@ async function findPagoByIdAndPedido(pagoId, pedidoId) {
   return row ? toPago(row) : null;
 }
 
-async function createPago({ pedidoId, metodoPagoId, monto, referencia }, connection) {
+async function createPago(
+  {
+    pedidoId,
+    metodoPagoId,
+    monedaId,
+    tipoCambioId,
+    monto,
+    montoRecibido,
+    vuelto,
+    tipoCambioUtilizado,
+    montoMoneda,
+    referencia,
+  },
+  connection,
+) {
+  const schema = await getSchemaCapabilities(connection);
+
+  if (!schema.hasPagosMonedaColumns) {
+    const legacyResult = await run(
+      `
+      INSERT INTO pagos (pedido_id, metodo_pago_id, monto, referencia, fecha)
+      VALUES (?, ?, ?, ?, NOW())
+      `,
+      [pedidoId, metodoPagoId, monto, referencia],
+      connection,
+    );
+
+    return legacyResult.insertId;
+  }
+
   const result = await run(
     `
-    INSERT INTO pagos (pedido_id, metodo_pago_id, monto, referencia, fecha)
-    VALUES (?, ?, ?, ?, NOW())
+    INSERT INTO pagos (
+      pedido_id,
+      metodo_pago_id,
+      moneda_id,
+      tipo_cambio_id,
+      monto,
+      monto_recibido,
+      vuelto,
+      tipo_cambio_utilizado,
+      monto_moneda,
+      referencia,
+      fecha
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `,
-    [pedidoId, metodoPagoId, monto, referencia],
+    [
+      pedidoId,
+      metodoPagoId,
+      monedaId,
+      tipoCambioId,
+      monto,
+      montoRecibido,
+      vuelto,
+      tipoCambioUtilizado,
+      montoMoneda,
+      referencia,
+    ],
     connection,
   );
 
   return result.insertId;
 }
 
-async function updatePago(pagoId, { metodoPagoId, monto, referencia }, connection) {
+async function updatePago(
+  pagoId,
+  { metodoPagoId, monedaId, tipoCambioId, monto, montoRecibido, vuelto, tipoCambioUtilizado, montoMoneda, referencia },
+  connection,
+) {
+  const schema = await getSchemaCapabilities(connection);
+
+  if (!schema.hasPagosMonedaColumns) {
+    const legacyResult = await run(
+      `
+      UPDATE pagos
+      SET metodo_pago_id = ?, monto = ?, referencia = ?
+      WHERE id = ?
+      `,
+      [metodoPagoId, monto, referencia, pagoId],
+      connection,
+    );
+
+    return legacyResult.affectedRows;
+  }
+
   const result = await run(
     `
     UPDATE pagos
-    SET metodo_pago_id = ?, monto = ?, referencia = ?
+    SET
+      metodo_pago_id = ?,
+      moneda_id = ?,
+      tipo_cambio_id = ?,
+      monto = ?,
+      monto_recibido = ?,
+      vuelto = ?,
+      tipo_cambio_utilizado = ?,
+      monto_moneda = ?,
+      referencia = ?
     WHERE id = ?
     `,
-    [metodoPagoId, monto, referencia, pagoId],
+    [metodoPagoId, monedaId, tipoCambioId, monto, montoRecibido, vuelto, tipoCambioUtilizado, montoMoneda, referencia, pagoId],
     connection,
   );
 
@@ -552,6 +845,207 @@ async function findMetodoPagoById(metodoPagoId) {
   return row ? toMetodoPago(row) : null;
 }
 
+async function listCuentasByPedidoId(pedidoId) {
+  const schema = await getSchemaCapabilities();
+  if (!schema.hasCuentasPedidoTable) {
+    return [];
+  }
+
+  const rows = await query(
+    `
+    SELECT
+      id,
+      pedido_id,
+      numero_cuenta,
+      subtotal,
+      impuesto,
+      descuento,
+      total,
+      estado,
+      fecha_creacion,
+      fecha_actualizacion
+    FROM cuentas_pedido
+    WHERE pedido_id = ?
+    ORDER BY numero_cuenta ASC, id ASC
+    `,
+    [pedidoId],
+  );
+
+  return rows.map(toCuentaPedido);
+}
+
+async function findCuentaByIdAndPedido(cuentaId, pedidoId, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasCuentasPedidoTable) {
+    return null;
+  }
+
+  const rows = await run(
+    `
+    SELECT
+      id,
+      pedido_id,
+      numero_cuenta,
+      subtotal,
+      impuesto,
+      descuento,
+      total,
+      estado,
+      fecha_creacion,
+      fecha_actualizacion
+    FROM cuentas_pedido
+    WHERE id = ? AND pedido_id = ?
+    LIMIT 1
+    `,
+    [cuentaId, pedidoId],
+    connection,
+  );
+
+  const row = rows[0];
+  return row ? toCuentaPedido(row) : null;
+}
+
+async function countCuentasByPedidoId(pedidoId, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasCuentasPedidoTable) {
+    return 0;
+  }
+
+  const rows = await run(
+    `
+    SELECT COUNT(*) AS total
+    FROM cuentas_pedido
+    WHERE pedido_id = ?
+    `,
+    [pedidoId],
+    connection,
+  );
+
+  return Number(rows[0]?.total || 0);
+}
+
+async function createCuentaPedido({ pedidoId, numeroCuenta, subtotal, impuesto, descuento, total, estado = "ABIERTA" }, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasCuentasPedidoTable) {
+    throw new Error("La tabla cuentas_pedido no existe");
+  }
+
+  const result = await run(
+    `
+    INSERT INTO cuentas_pedido (
+      pedido_id,
+      numero_cuenta,
+      subtotal,
+      impuesto,
+      descuento,
+      total,
+      estado,
+      fecha_creacion,
+      fecha_actualizacion
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    `,
+    [pedidoId, numeroCuenta, subtotal, impuesto, descuento, total, estado],
+    connection,
+  );
+
+  return result.insertId;
+}
+
+async function updateCuentaPedido(cuentaId, { subtotal, impuesto, descuento, total, estado }, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasCuentasPedidoTable) {
+    throw new Error("La tabla cuentas_pedido no existe");
+  }
+
+  const result = await run(
+    `
+    UPDATE cuentas_pedido
+    SET
+      subtotal = ?,
+      impuesto = ?,
+      descuento = ?,
+      total = ?,
+      estado = ?,
+      fecha_actualizacion = NOW()
+    WHERE id = ?
+    `,
+    [subtotal, impuesto, descuento, total, estado, cuentaId],
+    connection,
+  );
+
+  return result.affectedRows;
+}
+
+async function assignDetalleToCuenta(detalleId, pedidoId, cuentaPedidoId, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasDetalleCuentaPedidoId) {
+    throw new Error("La columna cuenta_pedido_id no existe en detalle_pedido");
+  }
+
+  const result = await run(
+    `
+    UPDATE detalle_pedido
+    SET cuenta_pedido_id = ?
+    WHERE id = ? AND pedido_id = ?
+    `,
+    [cuentaPedidoId, detalleId, pedidoId],
+    connection,
+  );
+
+  return result.affectedRows;
+}
+
+async function sumDetalleSubtotalByCuenta(cuentaPedidoId, connection) {
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasDetalleCuentaPedidoId) {
+    return 0;
+  }
+
+  const rows = await run(
+    `
+    SELECT COALESCE(SUM(subtotal), 0) AS total
+    FROM detalle_pedido
+    WHERE cuenta_pedido_id = ?
+    `,
+    [cuentaPedidoId],
+    connection,
+  );
+
+  return toMoney(rows[0]?.total || 0);
+}
+
+async function listDetalleByCuentaPedidoId(cuentaPedidoId) {
+  const schema = await getSchemaCapabilities();
+  if (!schema.hasDetalleCuentaPedidoId) {
+    return [];
+  }
+
+  const rows = await query(
+    `
+    SELECT
+      d.id,
+      d.pedido_id,
+      d.cuenta_pedido_id,
+      d.producto_id,
+      p.codigo AS producto_codigo,
+      p.nombre AS producto_nombre,
+      d.cantidad,
+      d.precio_unitario,
+      d.subtotal,
+      d.observacion,
+      d.created_at
+    FROM detalle_pedido d
+    LEFT JOIN productos p ON p.id = d.producto_id
+    WHERE d.cuenta_pedido_id = ?
+    ORDER BY d.id ASC
+    `,
+    [cuentaPedidoId],
+  );
+
+  return rows.map(toDetalle);
+}
+
 module.exports = {
   pool,
   listPedidos,
@@ -576,4 +1070,12 @@ module.exports = {
   sumPagosByPedidoId,
   listMetodosPago,
   findMetodoPagoById,
+  listCuentasByPedidoId,
+  findCuentaByIdAndPedido,
+  countCuentasByPedidoId,
+  createCuentaPedido,
+  updateCuentaPedido,
+  assignDetalleToCuenta,
+  sumDetalleSubtotalByCuenta,
+  listDetalleByCuentaPedidoId,
 };

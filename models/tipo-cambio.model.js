@@ -43,6 +43,21 @@ async function findTipoCambioById(tipoCambioId) {
   return row ? toTipoCambio(row) : null;
 }
 
+async function findLatestActiveTipoCambio() {
+  const rows = await query(
+    `
+    SELECT id, fecha, compra, venta, activo, usuario_id, created_at, updated_at
+    FROM tipo_cambio
+    WHERE activo = 1
+    ORDER BY fecha DESC, id DESC
+    LIMIT 1
+    `,
+  );
+
+  const row = rows[0];
+  return row ? toTipoCambio(row) : null;
+}
+
 async function createTipoCambio({ fecha, compra, venta, activo, usuarioId }) {
   const result = await query(
     `
@@ -71,6 +86,7 @@ async function updateTipoCambio(tipoCambioId, { fecha, compra, venta, activo, us
 module.exports = {
   listTipoCambio,
   findTipoCambioById,
+  findLatestActiveTipoCambio,
   createTipoCambio,
   updateTipoCambio,
 };

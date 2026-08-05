@@ -1,6 +1,8 @@
 const express = require("express");
 
 const {
+  assignPedidoAccountDetailsHandler,
+  createPedidoAccountHandler,
   createPedidoDetailHandler,
   createPedidoHandler,
   createPedidoPaymentHandler,
@@ -10,9 +12,12 @@ const {
   facturarPedidoHandler,
   getPedidoByIdHandler,
   listPaymentMethodsHandler,
+  listPedidoAccountsHandler,
   listPedidoDetailsHandler,
   listPedidoPaymentsHandler,
   listPedidosHandler,
+  movePedidoAccountDetailHandler,
+  removePedidoAccountDetailHandler,
   reprintPedidoFacturaHandler,
   reprintPedidoKitchenHandler,
   sendPedidoToKitchenHandler,
@@ -42,6 +47,12 @@ pedidoRouter.get("/:id/details", listPedidoDetailsHandler);
 pedidoRouter.post("/:id/details", createPedidoDetailHandler);
 pedidoRouter.put("/:id/details/:detailId", updatePedidoDetailHandler);
 pedidoRouter.delete("/:id/details/:detailId", deletePedidoDetailHandler);
+
+pedidoRouter.get("/:id/accounts", listPedidoAccountsHandler);
+pedidoRouter.post("/:id/accounts", createPedidoAccountHandler);
+pedidoRouter.post("/:id/accounts/:accountId/details", assignPedidoAccountDetailsHandler);
+pedidoRouter.post("/:id/accounts/:accountId/details/:detailId/move", movePedidoAccountDetailHandler);
+pedidoRouter.delete("/:id/accounts/:accountId/details/:detailId", removePedidoAccountDetailHandler);
 
 pedidoRouter.get("/:id/payments", listPedidoPaymentsHandler);
 pedidoRouter.post("/:id/payments", createPedidoPaymentHandler);

@@ -6,30 +6,40 @@ const {
   findColaImpresionById,
 } = require("../models/impresion.model");
 const {
+  countCuentasByPedidoId,
+  createCuentaPedido,
   createDetallePedido,
   createPago,
   createPedido,
   deleteDetallePedido,
   deletePago,
   deletePedidoCascade,
+  findCuentaByIdAndPedido,
   findDetalleByIdAndPedido,
   findMetodoPagoById,
   findPagoByIdAndPedido,
   findPedidoById,
   getNextPedidoCodeForDate,
+  listCuentasByPedidoId,
+  listDetalleByCuentaPedidoId,
   listDetalleByPedidoId,
   listMetodosPago,
   listPagosByPedidoId,
   listPedidos,
   pool,
+  sumDetalleSubtotalByCuenta,
   sumDetalleSubtotalByPedido,
   sumPagosByPedidoId,
+  updateCuentaPedido,
   updateDetallePedido,
   updatePago,
   updatePedido,
   updatePedidoTotals,
 } = require("../models/pedido.model");
+const { findConfiguracionByClave } = require("../models/configuracion.model");
+const { findMonedaByCode, findMonedaById, listMonedas } = require("../models/moneda.model");
 const { findProductById } = require("../models/product.model");
+const { findLatestActiveTipoCambio, findTipoCambioById } = require("../models/tipo-cambio.model");
 const { findUserById } = require("../models/user.model");
 
 const PEDIDO_TIPOS = new Set(["MESA", "LLEVAR"]);
@@ -47,6 +57,69 @@ function appError(status, message) {
 
 function normalizeUpper(value) {
   return String(value || "").trim().toUpperCase();
+}
+
+function parseBooleanInput(value, fallback = false) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value === 1;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  return ["1", "true", "si", "yes"].includes(normalized);
+}
+
+async function getServicePercentage() {
+  const config = await findConfiguracionByClave("PORCENTAJE_SERVICIO");
+  const parsed = Number(config?.valor);
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 10;
+  }
+
+  return parsed;
+}
+
+function resolveApplyService(input, fallback = true) {
+  if (input.tipo === "LLEVAR") {
+    return false;
+  }
+
+  if (input.aplicarServicio !== undefined) {
+    return parseBooleanInput(input.aplicarServicio, true);
+  }
+
+  if (input.exonerarServicio !== undefined) {
+    return !parseBooleanInput(input.exonerarServicio, false);
+  }
+
+  return fallback;
+}
+
+function computeServiceAmount(subtotal, applyService, servicePercentage) {
+  if (!applyService) {
+    return 0;
+  }
+
+  return roundMoney((roundMoney(subtotal) * Number(servicePercentage || 0)) / 100);
+}
+
+function computePedidoTotals(subtotal, applyService, servicePercentage) {
+  const roundedSubtotal = roundMoney(subtotal);
+  const impuesto = computeServiceAmount(roundedSubtotal, applyService, servicePercentage);
+
+  return {
+    subtotal: roundedSubtotal,
+    impuesto,
+    total: roundMoney(roundedSubtotal + impuesto),
+  };
 }
 
 function parseDateTime(value) {
@@ -135,7 +208,7 @@ function buildInvoiceTicket(pedido) {
 
   lines.push("");
   lines.push(`Subtotal: ${formatMoney(pedido.subtotal)}`);
-  lines.push(`IVA: ${formatMoney(pedido.impuesto)}`);
+  lines.push(`Servicio: ${formatMoney(pedido.impuesto)}`);
   lines.push(`TOTAL: ${formatMoney(pedido.total)}`);
   lines.push("Gracias por su visita");
   lines.push("**************");
@@ -186,7 +259,8 @@ function parsePedidoCreateInput(body, authUser) {
     usuarioId: Number(usuarioRaw),
     tipo: normalizeUpper(body.tipo),
     estado: normalizeUpper(body.estado || "BORRADOR"),
-    impuesto: Number(body.impuesto ?? 0),
+    aplicarServicio: body.aplicarServicio ?? body.aplica_servicio,
+    exonerarServicio: body.exonerarServicio ?? body.exonerar_servicio,
     fechaApertura: parseDateTime(body.fechaApertura ?? body.fecha_apertura),
     fechaCierre: parseDateTime(body.fechaCierre ?? body.fecha_cierre),
     detalles: Array.isArray(body.detalles) ? body.detalles : [],
@@ -214,7 +288,11 @@ function parsePedidoUpdateInput(body, existingPedido) {
     estado: Object.prototype.hasOwnProperty.call(body, "estado")
       ? normalizeUpper(body.estado)
       : existingPedido.estado,
-    impuesto: Object.prototype.hasOwnProperty.call(body, "impuesto") ? Number(body.impuesto) : existingPedido.impuesto,
+    aplicarServicio:
+      body.aplicarServicio ??
+      body.aplica_servicio ??
+      (Object.prototype.hasOwnProperty.call(body, "impuesto") ? Number(body.impuesto) > 0 : undefined),
+    exonerarServicio: body.exonerarServicio ?? body.exonerar_servicio,
     fechaApertura: hasFechaApertura
       ? parseDateTime(body.fechaApertura)
       : hasFechaAperturaAlias
@@ -234,7 +312,6 @@ function validatePedidoInput(input) {
   if (!PEDIDO_TIPOS.has(input.tipo)) missingFields.push("tipo");
   if (!PEDIDO_ESTADOS.has(input.estado)) missingFields.push("estado");
   if (!Number.isInteger(input.usuarioId) || input.usuarioId <= 0) missingFields.push("usuarioId");
-  if (!Number.isFinite(input.impuesto) || input.impuesto < 0) missingFields.push("impuesto");
 
   if (input.tipo === "MESA" && (!Number.isInteger(input.mesaId) || input.mesaId <= 0)) {
     missingFields.push("mesaId");
@@ -269,6 +346,12 @@ function validatePedidoInput(input) {
 }
 
 function parseDetalleInput(body, existingDetalle) {
+  const cuentaRaw = Object.prototype.hasOwnProperty.call(body, "cuentaPedidoId")
+    ? body.cuentaPedidoId
+    : Object.prototype.hasOwnProperty.call(body, "cuenta_pedido_id")
+      ? body.cuenta_pedido_id
+      : existingDetalle?.cuentaPedidoId;
+
   const productoRaw = Object.prototype.hasOwnProperty.call(body, "productoId")
     ? body.productoId
     : Object.prototype.hasOwnProperty.call(body, "producto_id")
@@ -288,6 +371,7 @@ function parseDetalleInput(body, existingDetalle) {
     : existingDetalle?.observacion;
 
   return {
+    cuentaPedidoId: cuentaRaw == null || cuentaRaw === "" ? null : Number(cuentaRaw),
     productoId: Number(productoRaw),
     cantidad: Number(cantidadRaw),
     precioUnitario: precioRaw == null || precioRaw === "" ? null : Number(precioRaw),
@@ -300,6 +384,10 @@ function validateDetalleInput(detalle) {
 
   if (!Number.isInteger(detalle.productoId) || detalle.productoId <= 0) missingFields.push("productoId");
   if (!Number.isInteger(detalle.cantidad) || detalle.cantidad <= 0) missingFields.push("cantidad");
+
+  if (detalle.cuentaPedidoId != null && (!Number.isInteger(detalle.cuentaPedidoId) || detalle.cuentaPedidoId <= 0)) {
+    missingFields.push("cuentaPedidoId");
+  }
 
   if (detalle.precioUnitario != null && (!Number.isFinite(detalle.precioUnitario) || detalle.precioUnitario < 0)) {
     missingFields.push("precioUnitario");
@@ -338,14 +426,50 @@ function parsePagoInput(body, existingPago) {
       ? body.metodo_pago_id
       : existingPago?.metodoPagoId;
 
+  const monedaRaw = Object.prototype.hasOwnProperty.call(body, "monedaId")
+    ? body.monedaId
+    : Object.prototype.hasOwnProperty.call(body, "moneda_id")
+      ? body.moneda_id
+      : existingPago?.monedaId;
+
+  const tipoCambioRaw = Object.prototype.hasOwnProperty.call(body, "tipoCambioId")
+    ? body.tipoCambioId
+    : Object.prototype.hasOwnProperty.call(body, "tipo_cambio_id")
+      ? body.tipo_cambio_id
+      : existingPago?.tipoCambioId;
+
   const montoRaw = Object.prototype.hasOwnProperty.call(body, "monto") ? body.monto : existingPago?.monto;
+  const montoMonedaRaw = Object.prototype.hasOwnProperty.call(body, "montoMoneda")
+    ? body.montoMoneda
+    : Object.prototype.hasOwnProperty.call(body, "monto_moneda")
+      ? body.monto_moneda
+      : existingPago?.montoMoneda;
+
+  const montoRecibidoRaw = Object.prototype.hasOwnProperty.call(body, "montoRecibido")
+    ? body.montoRecibido
+    : Object.prototype.hasOwnProperty.call(body, "monto_recibido")
+      ? body.monto_recibido
+      : existingPago?.montoRecibido;
+
+  const montoRecibidoMonedaRaw = Object.prototype.hasOwnProperty.call(body, "montoRecibidoMoneda")
+    ? body.montoRecibidoMoneda
+    : Object.prototype.hasOwnProperty.call(body, "monto_recibido_moneda")
+      ? body.monto_recibido_moneda
+      : undefined;
+
   const referenciaRaw = Object.prototype.hasOwnProperty.call(body, "referencia")
     ? body.referencia
     : existingPago?.referencia;
 
   return {
     metodoPagoId: Number(metodoRaw),
-    monto: Number(montoRaw),
+    monedaId: Number(monedaRaw),
+    tipoCambioId: tipoCambioRaw == null || tipoCambioRaw === "" ? null : Number(tipoCambioRaw),
+    monto: montoRaw == null || montoRaw === "" ? null : Number(montoRaw),
+    montoMoneda: montoMonedaRaw == null || montoMonedaRaw === "" ? null : Number(montoMonedaRaw),
+    montoRecibido: montoRecibidoRaw == null || montoRecibidoRaw === "" ? null : Number(montoRecibidoRaw),
+    montoRecibidoMoneda:
+      montoRecibidoMonedaRaw == null || montoRecibidoMonedaRaw === "" ? null : Number(montoRecibidoMonedaRaw),
     referencia: referenciaRaw == null ? null : String(referenciaRaw).trim(),
   };
 }
@@ -354,7 +478,14 @@ function validatePagoInput(pago) {
   const missingFields = [];
 
   if (!Number.isInteger(pago.metodoPagoId) || pago.metodoPagoId <= 0) missingFields.push("metodoPagoId");
-  if (!Number.isFinite(pago.monto) || pago.monto <= 0) missingFields.push("monto");
+  if (!Number.isInteger(pago.monedaId) || pago.monedaId <= 0) missingFields.push("monedaId");
+
+  const hasMonto = Number.isFinite(pago.monto) && pago.monto > 0;
+  const hasMontoMoneda = Number.isFinite(pago.montoMoneda) && pago.montoMoneda > 0;
+
+  if (!hasMonto && !hasMontoMoneda) {
+    missingFields.push("monto|montoMoneda");
+  }
 
   if (missingFields.length > 0) {
     return {
@@ -365,6 +496,11 @@ function validatePagoInput(pago) {
         missingFields,
         acceptedAliases: {
           metodoPagoId: ["metodoPagoId", "metodo_pago_id"],
+          monedaId: ["monedaId", "moneda_id"],
+          tipoCambioId: ["tipoCambioId", "tipo_cambio_id"],
+          montoMoneda: ["montoMoneda", "monto_moneda"],
+          montoRecibido: ["montoRecibido", "monto_recibido"],
+          montoRecibidoMoneda: ["montoRecibidoMoneda", "monto_recibido_moneda"],
         },
       },
     };
@@ -381,17 +517,251 @@ function validatePagoInput(pago) {
   return { ok: true };
 }
 
+async function resolvePedidoPayment(pagoInput) {
+  const moneda = await findMonedaById(pagoInput.monedaId);
+  if (!moneda || !moneda.activa) {
+    throw appError(400, "monedaId invalido o moneda inactiva");
+  }
+
+  const codigoMoneda = normalizeUpper(moneda.codigo);
+  const isUsd = codigoMoneda === "USD";
+  const isCrc = codigoMoneda === "CRC" || codigoMoneda === "COL";
+
+  if (!isUsd && !isCrc) {
+    throw appError(400, "La moneda seleccionada no esta soportada para facturacion");
+  }
+
+  let tipoCambio = null;
+  let tipoCambioUtilizado = 1;
+
+  if (isUsd) {
+    tipoCambio = pagoInput.tipoCambioId
+      ? await findTipoCambioById(pagoInput.tipoCambioId)
+      : await findLatestActiveTipoCambio();
+
+    if (!tipoCambio || !tipoCambio.activo) {
+      throw appError(409, "No hay tipo de cambio activo para pagos en dolares");
+    }
+
+    tipoCambioUtilizado = Number(tipoCambio.venta);
+    if (!Number.isFinite(tipoCambioUtilizado) || tipoCambioUtilizado <= 0) {
+      throw appError(409, "El tipo de cambio activo es invalido");
+    }
+  }
+
+  const hasMonto = Number.isFinite(pagoInput.monto) && pagoInput.monto > 0;
+  const hasMontoMoneda = Number.isFinite(pagoInput.montoMoneda) && pagoInput.montoMoneda > 0;
+
+  let montoColones = 0;
+  let montoMoneda = 0;
+
+  if (isUsd) {
+    if (hasMonto) {
+      montoColones = roundMoney(pagoInput.monto);
+      montoMoneda = roundMoney(montoColones / tipoCambioUtilizado);
+    } else {
+      montoMoneda = roundMoney(pagoInput.montoMoneda);
+      montoColones = roundMoney(montoMoneda * tipoCambioUtilizado);
+    }
+  } else {
+    montoColones = roundMoney(hasMonto ? pagoInput.monto : pagoInput.montoMoneda);
+    montoMoneda = montoColones;
+  }
+
+  if (!Number.isFinite(montoColones) || montoColones <= 0) {
+    throw appError(400, "El monto calculado es invalido");
+  }
+
+  const hasMontoRecibido = Number.isFinite(pagoInput.montoRecibido) && pagoInput.montoRecibido > 0;
+  const hasMontoRecibidoMoneda = Number.isFinite(pagoInput.montoRecibidoMoneda) && pagoInput.montoRecibidoMoneda > 0;
+
+  let montoRecibidoColones = montoColones;
+
+  if (isUsd) {
+    if (hasMontoRecibido) {
+      montoRecibidoColones = roundMoney(pagoInput.montoRecibido);
+    } else if (hasMontoRecibidoMoneda) {
+      montoRecibidoColones = roundMoney(pagoInput.montoRecibidoMoneda * tipoCambioUtilizado);
+    }
+  } else if (hasMontoRecibido || hasMontoRecibidoMoneda) {
+    montoRecibidoColones = roundMoney(hasMontoRecibido ? pagoInput.montoRecibido : pagoInput.montoRecibidoMoneda);
+  }
+
+  if (montoRecibidoColones + 0.009 < montoColones) {
+    throw appError(409, "El monto recibido es menor al monto a cobrar");
+  }
+
+  const vueltoColones = roundMoney(Math.max(0, montoRecibidoColones - montoColones));
+  const vuelto = isUsd ? roundMoney(vueltoColones / tipoCambioUtilizado) : vueltoColones;
+
+  return {
+    moneda,
+    tipoCambio,
+    monto: montoColones,
+    montoMoneda,
+    montoRecibido: montoRecibidoColones,
+    vuelto,
+    tipoCambioUtilizado,
+  };
+}
+
+async function recalculateCuentaTotals(cuentaId, pedido, servicePercentage, connection) {
+  const subtotal = roundMoney(await sumDetalleSubtotalByCuenta(cuentaId, connection));
+  const aplicarServicio = pedido.tipo === "MESA" && Number(pedido.impuesto) > 0;
+  const impuesto = computeServiceAmount(subtotal, aplicarServicio, servicePercentage);
+  const descuento = 0;
+  const total = roundMoney(subtotal + impuesto - descuento);
+
+  await updateCuentaPedido(
+    cuentaId,
+    {
+      subtotal,
+      impuesto,
+      descuento,
+      total,
+      estado: "ABIERTA",
+    },
+    connection,
+  );
+}
+
+function parseAccountSplitItems(body) {
+  const payload = body || {};
+  const rawItems = Array.isArray(payload.items)
+    ? payload.items
+    : Array.isArray(payload.detalles)
+      ? payload.detalles
+      : Array.isArray(payload.detailIds)
+        ? payload.detailIds.map((detailId) => ({ detailId }))
+        : Array.isArray(payload.detalleIds)
+          ? payload.detalleIds.map((detailId) => ({ detailId }))
+          : [];
+
+  return rawItems.map((item) => {
+    const source = typeof item === "object" && item !== null ? item : { detailId: item };
+    const detailRaw = source.detailId ?? source.detalleId ?? source.id;
+    const qtyRaw = source.cantidad ?? source.quantity ?? source.qty;
+
+    return {
+      detailId: Number(detailRaw),
+      cantidad: qtyRaw == null || qtyRaw === "" ? null : Number(qtyRaw),
+    };
+  });
+}
+
+function validateAccountSplitItems(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return {
+      ok: false,
+      message: "Debes enviar items con detalle y cantidad opcional",
+    };
+  }
+
+  for (const item of items) {
+    if (!Number.isInteger(item.detailId) || item.detailId <= 0) {
+      return {
+        ok: false,
+        message: "Cada item debe incluir detailId valido",
+      };
+    }
+
+    if (item.cantidad != null && (!Number.isInteger(item.cantidad) || item.cantidad <= 0)) {
+      return {
+        ok: false,
+        message: "La cantidad de cada item debe ser un entero mayor a 0",
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cantidad, connection }) {
+  const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+  if (!detail) {
+    throw appError(404, `Detalle ${detailId} no encontrado en el pedido`);
+  }
+
+  const currentQty = Number(detail.cantidad);
+  const moveQty = cantidad == null ? currentQty : Number(cantidad);
+
+  if (!Number.isInteger(moveQty) || moveQty <= 0) {
+    throw appError(400, `Cantidad invalida para detalle ${detailId}`);
+  }
+
+  if (moveQty > currentQty) {
+    throw appError(409, `La cantidad a mover excede la cantidad disponible del detalle ${detailId}`);
+  }
+
+  const fromCuentaId = detail.cuentaPedidoId;
+
+  if (moveQty === currentQty) {
+    await updateDetallePedido(
+      detailId,
+      {
+        cuentaPedidoId: cuentaId,
+        productoId: detail.productoId,
+        cantidad: currentQty,
+        precioUnitario: detail.precioUnitario,
+        subtotal: roundMoney(Number(detail.precioUnitario) * currentQty),
+        observacion: detail.observacion,
+      },
+      connection,
+    );
+
+    return { fromCuentaId, toCuentaId: cuentaId, movedQty: moveQty };
+  }
+
+  const remainingQty = currentQty - moveQty;
+  const unitPrice = Number(detail.precioUnitario);
+  const movedSubtotal = roundMoney(unitPrice * moveQty);
+  const remainingSubtotal = roundMoney(unitPrice * remainingQty);
+
+  await updateDetallePedido(
+    detailId,
+    {
+      cuentaPedidoId: fromCuentaId,
+      productoId: detail.productoId,
+      cantidad: remainingQty,
+      precioUnitario: unitPrice,
+      subtotal: remainingSubtotal,
+      observacion: detail.observacion,
+    },
+    connection,
+  );
+
+  await createDetallePedido(
+    {
+      pedidoId,
+      cuentaPedidoId: cuentaId,
+      productoId: detail.productoId,
+      cantidad: moveQty,
+      precioUnitario: unitPrice,
+      subtotal: movedSubtotal,
+      observacion: detail.observacion,
+    },
+    connection,
+  );
+
+  return { fromCuentaId, toCuentaId: cuentaId, movedQty: moveQty };
+}
+
 async function hydratePedido(pedidoId) {
   const pedido = await findPedidoById(pedidoId);
   if (!pedido) return null;
 
-  const [detalles, pagos] = await Promise.all([listDetalleByPedidoId(pedidoId), listPagosByPedidoId(pedidoId)]);
+  const [detalles, pagos, cuentas] = await Promise.all([
+    listDetalleByPedidoId(pedidoId),
+    listPagosByPedidoId(pedidoId),
+    listCuentasByPedidoId(pedidoId),
+  ]);
   const totalPagado = roundMoney(pagos.reduce((acc, item) => acc + Number(item.monto), 0));
 
   return {
     ...pedido,
     detalles,
     pagos,
+    cuentas,
     totalPagado,
     saldoPendiente: roundMoney(pedido.total - totalPagado),
   };
@@ -458,6 +828,7 @@ async function getPedidoByIdHandler(req, res) {
 async function createPedidoHandler(req, res) {
   const input = parsePedidoCreateInput(req.body || {}, req.authUser);
   const validation = validatePedidoInput(input);
+  const servicePercentage = await getServicePercentage();
 
   if (!validation.ok) {
     res.status(validation.status).json(validation.payload);
@@ -495,6 +866,7 @@ async function createPedidoHandler(req, res) {
       return;
     }
 
+    parsedDetalle.cuentaPedidoId = null;
     normalizedDetalles.push(parsedDetalle);
   }
 
@@ -505,6 +877,7 @@ async function createPedidoHandler(req, res) {
 
     const fechaApertura = input.fechaApertura || new Date();
     const generatedCode = await getNextPedidoCodeForDate(fechaApertura, connection);
+    const applyService = resolveApplyService(input, true);
 
     const pedidoId = await createPedido(
       {
@@ -514,8 +887,8 @@ async function createPedidoHandler(req, res) {
         tipo: input.tipo,
         estado: input.estado,
         subtotal: 0,
-        impuesto: roundMoney(input.impuesto),
-        total: roundMoney(input.impuesto),
+        impuesto: 0,
+        total: 0,
         fechaApertura,
         fechaCierre: input.estado === "CERRADO" ? input.fechaCierre || new Date() : input.fechaCierre,
       },
@@ -534,6 +907,7 @@ async function createPedidoHandler(req, res) {
       await createDetallePedido(
         {
           pedidoId,
+          cuentaPedidoId: detalle.cuentaPedidoId,
           productoId: detalle.productoId,
           cantidad: detalle.cantidad,
           precioUnitario: price,
@@ -545,15 +919,14 @@ async function createPedidoHandler(req, res) {
     }
 
     const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
-    const impuesto = roundMoney(input.impuesto);
-    const total = roundMoney(subtotal + impuesto);
+    const totals = computePedidoTotals(subtotal, applyService, servicePercentage);
 
     await updatePedidoTotals(
       pedidoId,
       {
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
       },
       connection,
     );
@@ -595,6 +968,7 @@ async function updatePedidoHandler(req, res) {
 
   const input = parsePedidoUpdateInput(req.body || {}, existingPedido);
   const validation = validatePedidoInput(input);
+  const servicePercentage = await getServicePercentage();
 
   if (!validation.ok) {
     res.status(validation.status).json(validation.payload);
@@ -620,17 +994,17 @@ async function updatePedidoHandler(req, res) {
   }
 
   const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId));
-  const impuesto = roundMoney(input.impuesto);
-  const total = roundMoney(subtotal + impuesto);
+  const applyService = resolveApplyService(input, existingPedido.tipo === "MESA" && Number(existingPedido.impuesto) > 0);
+  const totals = computePedidoTotals(subtotal, applyService, servicePercentage);
 
   if (input.estado === "CERRADO") {
     const totalPagado = roundMoney(await sumPagosByPedidoId(pedidoId));
-    if (totalPagado + 0.009 < total) {
+    if (totalPagado + 0.009 < totals.total) {
       res.status(409).json({
         message: "No se puede cerrar el pedido porque aun tiene saldo pendiente",
-        total,
+        total: totals.total,
         totalPagado,
-        saldoPendiente: roundMoney(total - totalPagado),
+        saldoPendiente: roundMoney(totals.total - totalPagado),
       });
       return;
     }
@@ -646,12 +1020,23 @@ async function updatePedidoHandler(req, res) {
     usuarioId: input.usuarioId,
     tipo: input.tipo,
     estado: input.estado,
-    subtotal,
-    impuesto,
-    total,
+    subtotal: totals.subtotal,
+    impuesto: totals.impuesto,
+    total: totals.total,
     fechaApertura: input.fechaApertura,
     fechaCierre: input.fechaCierre,
   });
+
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  const pedidoForAccounts = {
+    ...existingPedido,
+    tipo: input.tipo,
+    impuesto: totals.impuesto,
+  };
+
+  for (const cuenta of cuentas) {
+    await recalculateCuentaTotals(cuenta.id, pedidoForAccounts, servicePercentage);
+  }
 
   const updatedPedido = await hydratePedido(pedidoId);
 
@@ -729,6 +1114,7 @@ async function createPedidoDetailHandler(req, res) {
 
   const detalleInput = parseDetalleInput(req.body || {});
   const validation = validateDetalleInput(detalleInput);
+  const servicePercentage = await getServicePercentage();
 
   if (!validation.ok) {
     res.status(validation.status).json(validation.payload);
@@ -749,9 +1135,17 @@ async function createPedidoDetailHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    if (detalleInput.cuentaPedidoId != null) {
+      const cuenta = await findCuentaByIdAndPedido(detalleInput.cuentaPedidoId, pedidoId, connection);
+      if (!cuenta || cuenta.estado !== "ABIERTA") {
+        throw appError(400, "cuentaPedidoId invalida o no disponible");
+      }
+    }
+
     const detailId = await createDetallePedido(
       {
         pedidoId,
+        cuentaPedidoId: detalleInput.cuentaPedidoId,
         productoId: detalleInput.productoId,
         cantidad: detalleInput.cantidad,
         precioUnitario: price,
@@ -762,18 +1156,21 @@ async function createPedidoDetailHandler(req, res) {
     );
 
     const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
-    const impuesto = roundMoney(pedido.impuesto);
-    const total = roundMoney(subtotal + impuesto);
+    const totals = computePedidoTotals(subtotal, pedido.tipo === "MESA" && Number(pedido.impuesto) > 0, servicePercentage);
 
     await updatePedidoTotals(
       pedidoId,
       {
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
       },
       connection,
     );
+
+    if (detalleInput.cuentaPedidoId != null) {
+      await recalculateCuentaTotals(detalleInput.cuentaPedidoId, pedido, servicePercentage, connection);
+    }
 
     await connection.commit();
 
@@ -823,6 +1220,7 @@ async function updatePedidoDetailHandler(req, res) {
 
   const detalleInput = parseDetalleInput(req.body || {}, existingDetail);
   const validation = validateDetalleInput(detalleInput);
+  const servicePercentage = await getServicePercentage();
 
   if (!validation.ok) {
     res.status(validation.status).json(validation.payload);
@@ -843,9 +1241,17 @@ async function updatePedidoDetailHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    if (detalleInput.cuentaPedidoId != null) {
+      const cuenta = await findCuentaByIdAndPedido(detalleInput.cuentaPedidoId, pedidoId, connection);
+      if (!cuenta || cuenta.estado !== "ABIERTA") {
+        throw appError(400, "cuentaPedidoId invalida o no disponible");
+      }
+    }
+
     await updateDetallePedido(
       detailId,
       {
+        cuentaPedidoId: detalleInput.cuentaPedidoId,
         productoId: detalleInput.productoId,
         cantidad: detalleInput.cantidad,
         precioUnitario: price,
@@ -856,18 +1262,25 @@ async function updatePedidoDetailHandler(req, res) {
     );
 
     const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
-    const impuesto = roundMoney(pedido.impuesto);
-    const total = roundMoney(subtotal + impuesto);
+    const totals = computePedidoTotals(subtotal, pedido.tipo === "MESA" && Number(pedido.impuesto) > 0, servicePercentage);
 
     await updatePedidoTotals(
       pedidoId,
       {
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
       },
       connection,
     );
+
+    if (existingDetail.cuentaPedidoId != null) {
+      await recalculateCuentaTotals(existingDetail.cuentaPedidoId, pedido, servicePercentage, connection);
+    }
+
+    if (detalleInput.cuentaPedidoId != null && detalleInput.cuentaPedidoId !== existingDetail.cuentaPedidoId) {
+      await recalculateCuentaTotals(detalleInput.cuentaPedidoId, pedido, servicePercentage, connection);
+    }
 
     await connection.commit();
 
@@ -915,6 +1328,8 @@ async function deletePedidoDetailHandler(req, res) {
     return;
   }
 
+  const servicePercentage = await getServicePercentage();
+
   const connection = await pool.getConnection();
 
   try {
@@ -923,18 +1338,21 @@ async function deletePedidoDetailHandler(req, res) {
     await deleteDetallePedido(detailId, connection);
 
     const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
-    const impuesto = roundMoney(pedido.impuesto);
-    const total = roundMoney(subtotal + impuesto);
+    const totals = computePedidoTotals(subtotal, pedido.tipo === "MESA" && Number(pedido.impuesto) > 0, servicePercentage);
 
     await updatePedidoTotals(
       pedidoId,
       {
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
       },
       connection,
     );
+
+    if (existingDetail.cuentaPedidoId != null) {
+      await recalculateCuentaTotals(existingDetail.cuentaPedidoId, pedido, servicePercentage, connection);
+    }
 
     await connection.commit();
 
@@ -946,6 +1364,436 @@ async function deletePedidoDetailHandler(req, res) {
     });
   } catch (error) {
     await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function listPedidoAccountsHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const pedido = await ensurePedidoExists(pedidoId, res);
+  if (!pedido) return;
+
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  const cuentasConDetalles = await Promise.all(
+    cuentas.map(async (cuenta) => ({
+      ...cuenta,
+      detalles: await listDetalleByCuentaPedidoId(cuenta.id),
+    })),
+  );
+
+  res.json({ pedidoId, cuentas: cuentasConDetalles });
+}
+
+async function createPedidoAccountHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const pedido = await ensurePedidoExists(pedidoId, res);
+  if (!pedido) return;
+
+  if (["CERRADO", "CANCELADO"].includes(pedido.estado)) {
+    res.status(409).json({ message: "No se pueden crear cuentas en un pedido cerrado o cancelado" });
+    return;
+  }
+
+  const splitItems = parseAccountSplitItems(req.body);
+  const numeroCuentaRaw = req.body?.numeroCuenta ?? req.body?.numero_cuenta;
+  const numeroCuenta = numeroCuentaRaw == null || numeroCuentaRaw === "" ? null : Number(numeroCuentaRaw);
+
+  if (numeroCuenta != null && (!Number.isInteger(numeroCuenta) || numeroCuenta <= 0)) {
+    res.status(400).json({ message: "numeroCuenta invalido" });
+    return;
+  }
+
+  if (splitItems.length > 0) {
+    const splitValidation = validateAccountSplitItems(splitItems);
+    if (!splitValidation.ok) {
+      res.status(400).json({ message: splitValidation.message });
+      return;
+    }
+  }
+
+  const servicePercentage = await getServicePercentage();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const totalCuentas = await countCuentasByPedidoId(pedidoId, connection);
+    const numeroFinal = numeroCuenta || totalCuentas + 1;
+
+    const cuentaId = await createCuentaPedido(
+      {
+        pedidoId,
+        numeroCuenta: numeroFinal,
+        subtotal: 0,
+        impuesto: 0,
+        descuento: 0,
+        total: 0,
+        estado: "ABIERTA",
+      },
+      connection,
+    );
+
+    const affectedAccounts = new Set([cuentaId]);
+
+    if (splitItems.length > 0) {
+      for (const item of splitItems) {
+        const movement = await assignDetailQuantityToCuenta({
+          pedidoId,
+          cuentaId,
+          detailId: item.detailId,
+          cantidad: item.cantidad,
+          connection,
+        });
+
+        if (movement.fromCuentaId != null) {
+          affectedAccounts.add(movement.fromCuentaId);
+        }
+      }
+    }
+
+    for (const affectedCuentaId of affectedAccounts) {
+      await recalculateCuentaTotals(affectedCuentaId, pedido, servicePercentage, connection);
+    }
+
+    await connection.commit();
+
+    const cuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId);
+    const detalles = await listDetalleByCuentaPedidoId(cuentaId);
+
+    res.status(201).json({
+      message: "Cuenta dividida creada exitosamente",
+      cuenta: {
+        ...cuenta,
+        detalles,
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function assignPedidoAccountDetailsHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  const cuentaId = Number(req.params.accountId);
+
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  if (!Number.isInteger(cuentaId) || cuentaId <= 0) {
+    res.status(400).json({ message: "id de cuenta invalido" });
+    return;
+  }
+
+  const pedido = await ensurePedidoExists(pedidoId, res);
+  if (!pedido) return;
+
+  const splitItems = parseAccountSplitItems(req.body);
+  const splitValidation = validateAccountSplitItems(splitItems);
+  if (!splitValidation.ok) {
+    res.status(400).json({ message: splitValidation.message });
+    return;
+  }
+
+  const servicePercentage = await getServicePercentage();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const cuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId, connection);
+    if (!cuenta || cuenta.estado !== "ABIERTA") {
+      throw appError(404, "Cuenta no encontrada o no disponible");
+    }
+
+    const affectedAccounts = new Set([cuentaId]);
+
+    for (const item of splitItems) {
+      const movement = await assignDetailQuantityToCuenta({
+        pedidoId,
+        cuentaId,
+        detailId: item.detailId,
+        cantidad: item.cantidad,
+        connection,
+      });
+
+      if (movement.fromCuentaId != null) {
+        affectedAccounts.add(movement.fromCuentaId);
+      }
+    }
+
+    for (const affectedCuentaId of affectedAccounts) {
+      await recalculateCuentaTotals(affectedCuentaId, pedido, servicePercentage, connection);
+    }
+
+    await connection.commit();
+
+    const updatedCuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId);
+    const detalles = await listDetalleByCuentaPedidoId(cuentaId);
+
+    res.json({
+      message: "Productos asignados a la cuenta exitosamente",
+      cuenta: {
+        ...updatedCuenta,
+        detalles,
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function removePedidoAccountDetailHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  const cuentaId = Number(req.params.accountId);
+  const detailId = Number(req.params.detailId);
+
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  if (!Number.isInteger(cuentaId) || cuentaId <= 0) {
+    res.status(400).json({ message: "id de cuenta invalido" });
+    return;
+  }
+
+  if (!Number.isInteger(detailId) || detailId <= 0) {
+    res.status(400).json({ message: "id de detalle invalido" });
+    return;
+  }
+
+  const pedido = await ensurePedidoExists(pedidoId, res);
+  if (!pedido) return;
+
+  const body = req.body || {};
+  const cantidadRaw = body.cantidad ?? body.quantity ?? body.qty;
+  const cantidad = cantidadRaw == null || cantidadRaw === "" ? null : Number(cantidadRaw);
+
+  if (cantidad != null && (!Number.isInteger(cantidad) || cantidad <= 0)) {
+    res.status(400).json({ message: "cantidad invalida" });
+    return;
+  }
+
+  const servicePercentage = await getServicePercentage();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const cuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId, connection);
+    if (!cuenta || cuenta.estado !== "ABIERTA") {
+      throw appError(404, "Cuenta no encontrada o no disponible");
+    }
+
+    const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+    if (!detail) {
+      throw appError(404, "Detalle no encontrado");
+    }
+
+    if (detail.cuentaPedidoId !== cuentaId) {
+      throw appError(409, "El detalle no pertenece a esta cuenta");
+    }
+
+    const movement = await assignDetailQuantityToCuenta({
+      pedidoId,
+      cuentaId: null,
+      detailId,
+      cantidad,
+      connection,
+    });
+
+    const affectedAccounts = new Set([cuentaId]);
+    if (movement.toCuentaId != null) {
+      affectedAccounts.add(movement.toCuentaId);
+    }
+
+    for (const affectedCuentaId of affectedAccounts) {
+      await recalculateCuentaTotals(affectedCuentaId, pedido, servicePercentage, connection);
+    }
+
+    await connection.commit();
+
+    const updatedCuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId);
+    const detalles = await listDetalleByCuentaPedidoId(cuentaId);
+
+    res.json({
+      message:
+        movement.movedQty === Number(detail.cantidad)
+          ? "Producto removido de la cuenta exitosamente"
+          : "Cantidad removida de la cuenta exitosamente",
+      cuenta: {
+        ...updatedCuenta,
+        detalles,
+      },
+      moved: {
+        detailId,
+        cantidad: movement.movedQty,
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function movePedidoAccountDetailHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  const cuentaId = Number(req.params.accountId);
+  const detailId = Number(req.params.detailId);
+
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  if (!Number.isInteger(cuentaId) || cuentaId <= 0) {
+    res.status(400).json({ message: "id de cuenta origen invalido" });
+    return;
+  }
+
+  if (!Number.isInteger(detailId) || detailId <= 0) {
+    res.status(400).json({ message: "id de detalle invalido" });
+    return;
+  }
+
+  const pedido = await ensurePedidoExists(pedidoId, res);
+  if (!pedido) return;
+
+  const body = req.body || {};
+  const cantidadRaw = body.cantidad ?? body.quantity ?? body.qty;
+  const cantidad = cantidadRaw == null || cantidadRaw === "" ? null : Number(cantidadRaw);
+
+  if (cantidad != null && (!Number.isInteger(cantidad) || cantidad <= 0)) {
+    res.status(400).json({ message: "cantidad invalida" });
+    return;
+  }
+
+  const cuentaDestinoRaw =
+    body.cuentaDestinoId ?? body.cuenta_destino_id ?? body.targetAccountId ?? body.target_account_id;
+  const cuentaDestinoId =
+    cuentaDestinoRaw == null || cuentaDestinoRaw === "" ? null : Number(cuentaDestinoRaw);
+
+  if (cuentaDestinoId != null && (!Number.isInteger(cuentaDestinoId) || cuentaDestinoId <= 0)) {
+    res.status(400).json({ message: "cuentaDestinoId invalida" });
+    return;
+  }
+
+  if (cuentaDestinoId != null && cuentaDestinoId === cuentaId) {
+    res.status(409).json({ message: "La cuenta destino debe ser distinta de la cuenta origen" });
+    return;
+  }
+
+  const servicePercentage = await getServicePercentage();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const cuentaOrigen = await findCuentaByIdAndPedido(cuentaId, pedidoId, connection);
+    if (!cuentaOrigen || cuentaOrigen.estado !== "ABIERTA") {
+      throw appError(404, "Cuenta origen no encontrada o no disponible");
+    }
+
+    const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+    if (!detail) {
+      throw appError(404, "Detalle no encontrado");
+    }
+
+    if (detail.cuentaPedidoId !== cuentaId) {
+      throw appError(409, "El detalle no pertenece a la cuenta origen");
+    }
+
+    if (cuentaDestinoId != null) {
+      const cuentaDestino = await findCuentaByIdAndPedido(cuentaDestinoId, pedidoId, connection);
+      if (!cuentaDestino || cuentaDestino.estado !== "ABIERTA") {
+        throw appError(404, "Cuenta destino no encontrada o no disponible");
+      }
+    }
+
+    const movement = await assignDetailQuantityToCuenta({
+      pedidoId,
+      cuentaId: cuentaDestinoId,
+      detailId,
+      cantidad,
+      connection,
+    });
+
+    const affectedAccounts = new Set([cuentaId]);
+    if (cuentaDestinoId != null) {
+      affectedAccounts.add(cuentaDestinoId);
+    }
+
+    for (const affectedCuentaId of affectedAccounts) {
+      await recalculateCuentaTotals(affectedCuentaId, pedido, servicePercentage, connection);
+    }
+
+    await connection.commit();
+
+    const sourceAccount = await findCuentaByIdAndPedido(cuentaId, pedidoId);
+    const destinationAccount = cuentaDestinoId == null ? null : await findCuentaByIdAndPedido(cuentaDestinoId, pedidoId);
+
+    res.json({
+      message:
+        cuentaDestinoId == null
+          ? "Cantidad movida a no asignado exitosamente"
+          : "Cantidad movida a la cuenta destino exitosamente",
+      moved: {
+        detailId,
+        cantidad: movement.movedQty,
+        fromAccountId: cuentaId,
+        toAccountId: cuentaDestinoId,
+      },
+      sourceAccount,
+      destinationAccount,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
     throw error;
   } finally {
     connection.release();
@@ -1002,15 +1850,27 @@ async function createPedidoPaymentHandler(req, res) {
     return;
   }
 
+  let paymentPayload;
+  try {
+    paymentPayload = await resolvePedidoPayment(pagoInput);
+  } catch (error) {
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  }
+
   const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId));
-  const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(pagoInput.monto));
+  const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(paymentPayload.monto));
 
   if (nuevoTotalPagado > roundMoney(Number(pedido.total)) + 0.009) {
     res.status(409).json({
       message: "El pago excede el total del pedido",
       totalPedido: roundMoney(Number(pedido.total)),
       totalPagadoActual,
-      montoIntentado: roundMoney(pagoInput.monto),
+      montoIntentado: roundMoney(paymentPayload.monto),
     });
     return;
   }
@@ -1018,7 +1878,13 @@ async function createPedidoPaymentHandler(req, res) {
   const pagoId = await createPago({
     pedidoId,
     metodoPagoId: pagoInput.metodoPagoId,
-    monto: roundMoney(pagoInput.monto),
+    monedaId: paymentPayload.moneda.id,
+    tipoCambioId: paymentPayload.tipoCambio?.id || null,
+    monto: paymentPayload.monto,
+    montoRecibido: paymentPayload.montoRecibido,
+    vuelto: paymentPayload.vuelto,
+    tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
+    montoMoneda: paymentPayload.montoMoneda,
     referencia: pagoInput.referencia,
   });
 
@@ -1074,23 +1940,41 @@ async function updatePedidoPaymentHandler(req, res) {
     return;
   }
 
+  let paymentPayload;
+  try {
+    paymentPayload = await resolvePedidoPayment(pagoInput);
+  } catch (error) {
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  }
+
   const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId));
   const totalSinEstePago = roundMoney(totalPagadoActual - Number(existingPago.monto));
-  const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(pagoInput.monto));
+  const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(paymentPayload.monto));
 
   if (nuevoTotalPagado > roundMoney(Number(pedido.total)) + 0.009) {
     res.status(409).json({
       message: "El pago excede el total del pedido",
       totalPedido: roundMoney(Number(pedido.total)),
       totalPagadoActual,
-      montoIntentado: roundMoney(pagoInput.monto),
+      montoIntentado: roundMoney(paymentPayload.monto),
     });
     return;
   }
 
   await updatePago(paymentId, {
     metodoPagoId: pagoInput.metodoPagoId,
-    monto: roundMoney(pagoInput.monto),
+    monedaId: paymentPayload.moneda.id,
+    tipoCambioId: paymentPayload.tipoCambio?.id || null,
+    monto: paymentPayload.monto,
+    montoRecibido: paymentPayload.montoRecibido,
+    vuelto: paymentPayload.vuelto,
+    tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
+    montoMoneda: paymentPayload.montoMoneda,
     referencia: pagoInput.referencia,
   });
 
@@ -1142,8 +2026,25 @@ async function deletePedidoPaymentHandler(req, res) {
 }
 
 async function listPaymentMethodsHandler(_req, res) {
-  const methods = await listMetodosPago();
-  res.json({ methods });
+  const [methods, monedas, tipoCambioActivo, servicePercentage, monedaColones, monedaDolares] = await Promise.all([
+    listMetodosPago(),
+    listMonedas({ onlyActive: true }),
+    findLatestActiveTipoCambio(),
+    getServicePercentage(),
+    findMonedaByCode("CRC"),
+    findMonedaByCode("USD"),
+  ]);
+
+  res.json({
+    methods,
+    monedas,
+    tipoCambioActivo,
+    configuracionFacturacion: {
+      porcentajeServicio: servicePercentage,
+      monedaLocalId: monedaColones?.id || null,
+      monedaDolarId: monedaDolares?.id || null,
+    },
+  });
 }
 
 async function sendPedidoToKitchenHandler(req, res) {
@@ -1274,21 +2175,25 @@ async function facturarPedidoHandler(req, res) {
   }
 
   const connection = await pool.getConnection();
+  const servicePercentage = await getServicePercentage();
 
   try {
     await connection.beginTransaction();
 
     const pedidoState = await findPedidoById(pedidoId);
     const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId, connection));
-    const impuesto = roundMoney(pedidoState.impuesto);
-    const total = roundMoney(subtotal + impuesto);
+    const totals = computePedidoTotals(
+      subtotal,
+      pedidoState.tipo === "MESA" && Number(pedidoState.impuesto) > 0,
+      servicePercentage,
+    );
 
     await updatePedidoTotals(
       pedidoId,
       {
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
       },
       connection,
     );
@@ -1301,9 +2206,9 @@ async function facturarPedidoHandler(req, res) {
         usuarioId: pedidoState.usuarioId,
         tipo: pedidoState.tipo,
         estado: "FACTURADO",
-        subtotal,
-        impuesto,
-        total,
+        subtotal: totals.subtotal,
+        impuesto: totals.impuesto,
+        total: totals.total,
         fechaApertura: pedidoState.fechaApertura,
         fechaCierre: pedidoState.fechaCierre,
       },
@@ -1313,9 +2218,9 @@ async function facturarPedidoHandler(req, res) {
     const pedidoToPrint = {
       ...existingPedido,
       estado: "FACTURADO",
-      subtotal,
-      impuesto,
-      total,
+      subtotal: totals.subtotal,
+      impuesto: totals.impuesto,
+      total: totals.total,
     };
 
     const jobId = await queuePedidoPrint(
@@ -1493,6 +2398,11 @@ module.exports = {
   createPedidoDetailHandler,
   updatePedidoDetailHandler,
   deletePedidoDetailHandler,
+  listPedidoAccountsHandler,
+  createPedidoAccountHandler,
+  assignPedidoAccountDetailsHandler,
+  movePedidoAccountDetailHandler,
+  removePedidoAccountDetailHandler,
   listPedidoPaymentsHandler,
   createPedidoPaymentHandler,
   updatePedidoPaymentHandler,
