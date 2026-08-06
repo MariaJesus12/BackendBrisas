@@ -29,6 +29,7 @@ const {
   pool,
   sumDetalleSubtotalByCuenta,
   sumDetalleSubtotalByPedido,
+  sumPagosByCuentaPedidoId,
   sumPagosByPedidoId,
   updateCuentaPedido,
   updateDetallePedido,
@@ -438,6 +439,16 @@ function parsePagoInput(body, existingPago) {
       ? body.tipo_cambio_id
       : existingPago?.tipoCambioId;
 
+  const cuentaPedidoRaw = Object.prototype.hasOwnProperty.call(body, "cuentaPedidoId")
+    ? body.cuentaPedidoId
+    : Object.prototype.hasOwnProperty.call(body, "cuenta_pedido_id")
+      ? body.cuenta_pedido_id
+      : Object.prototype.hasOwnProperty.call(body, "cuentaId")
+        ? body.cuentaId
+        : Object.prototype.hasOwnProperty.call(body, "cuenta_id")
+          ? body.cuenta_id
+      : existingPago?.cuentaPedidoId;
+
   const montoRaw = Object.prototype.hasOwnProperty.call(body, "monto") ? body.monto : existingPago?.monto;
   const montoMonedaRaw = Object.prototype.hasOwnProperty.call(body, "montoMoneda")
     ? body.montoMoneda
@@ -463,6 +474,7 @@ function parsePagoInput(body, existingPago) {
 
   return {
     metodoPagoId: Number(metodoRaw),
+    cuentaPedidoId: cuentaPedidoRaw == null || cuentaPedidoRaw === "" ? null : Number(cuentaPedidoRaw),
     monedaId: Number(monedaRaw),
     tipoCambioId: tipoCambioRaw == null || tipoCambioRaw === "" ? null : Number(tipoCambioRaw),
     monto: montoRaw == null || montoRaw === "" ? null : Number(montoRaw),
@@ -480,6 +492,10 @@ function validatePagoInput(pago) {
   if (!Number.isInteger(pago.metodoPagoId) || pago.metodoPagoId <= 0) missingFields.push("metodoPagoId");
   if (!Number.isInteger(pago.monedaId) || pago.monedaId <= 0) missingFields.push("monedaId");
 
+  if (pago.cuentaPedidoId != null && (!Number.isInteger(pago.cuentaPedidoId) || pago.cuentaPedidoId <= 0)) {
+    missingFields.push("cuentaPedidoId");
+  }
+
   const hasMonto = Number.isFinite(pago.monto) && pago.monto > 0;
   const hasMontoMoneda = Number.isFinite(pago.montoMoneda) && pago.montoMoneda > 0;
 
@@ -496,6 +512,7 @@ function validatePagoInput(pago) {
         missingFields,
         acceptedAliases: {
           metodoPagoId: ["metodoPagoId", "metodo_pago_id"],
+          cuentaPedidoId: ["cuentaPedidoId", "cuenta_pedido_id", "cuentaId", "cuenta_id"],
           monedaId: ["monedaId", "moneda_id"],
           tipoCambioId: ["tipoCambioId", "tipo_cambio_id"],
           montoMoneda: ["montoMoneda", "monto_moneda"],
@@ -517,7 +534,7 @@ function validatePagoInput(pago) {
   return { ok: true };
 }
 
-async function resolvePedidoPayment(pagoInput) {
+async function resolvePedidoPayment(pagoInput, { disableReceivedAmount = false } = {}) {
   const moneda = await findMonedaById(pagoInput.monedaId);
   if (!moneda || !moneda.activa) {
     throw appError(400, "monedaId invalido o moneda inactiva");
@@ -572,27 +589,30 @@ async function resolvePedidoPayment(pagoInput) {
     throw appError(400, "El monto calculado es invalido");
   }
 
-  const hasMontoRecibido = Number.isFinite(pagoInput.montoRecibido) && pagoInput.montoRecibido > 0;
-  const hasMontoRecibidoMoneda = Number.isFinite(pagoInput.montoRecibidoMoneda) && pagoInput.montoRecibidoMoneda > 0;
-
   let montoRecibidoColones = montoColones;
+  let vuelto = 0;
 
-  if (isUsd) {
-    if (hasMontoRecibido) {
-      montoRecibidoColones = roundMoney(pagoInput.montoRecibido);
-    } else if (hasMontoRecibidoMoneda) {
-      montoRecibidoColones = roundMoney(pagoInput.montoRecibidoMoneda * tipoCambioUtilizado);
+  if (!disableReceivedAmount) {
+    const hasMontoRecibido = Number.isFinite(pagoInput.montoRecibido) && pagoInput.montoRecibido > 0;
+    const hasMontoRecibidoMoneda = Number.isFinite(pagoInput.montoRecibidoMoneda) && pagoInput.montoRecibidoMoneda > 0;
+
+    if (isUsd) {
+      if (hasMontoRecibido) {
+        montoRecibidoColones = roundMoney(pagoInput.montoRecibido);
+      } else if (hasMontoRecibidoMoneda) {
+        montoRecibidoColones = roundMoney(pagoInput.montoRecibidoMoneda * tipoCambioUtilizado);
+      }
+    } else if (hasMontoRecibido || hasMontoRecibidoMoneda) {
+      montoRecibidoColones = roundMoney(hasMontoRecibido ? pagoInput.montoRecibido : pagoInput.montoRecibidoMoneda);
     }
-  } else if (hasMontoRecibido || hasMontoRecibidoMoneda) {
-    montoRecibidoColones = roundMoney(hasMontoRecibido ? pagoInput.montoRecibido : pagoInput.montoRecibidoMoneda);
-  }
 
-  if (montoRecibidoColones + 0.009 < montoColones) {
-    throw appError(409, "El monto recibido es menor al monto a cobrar");
-  }
+    if (montoRecibidoColones + 0.009 < montoColones) {
+      throw appError(409, "El monto recibido es menor al monto a cobrar");
+    }
 
-  const vueltoColones = roundMoney(Math.max(0, montoRecibidoColones - montoColones));
-  const vuelto = isUsd ? roundMoney(vueltoColones / tipoCambioUtilizado) : vueltoColones;
+    const vueltoColones = roundMoney(Math.max(0, montoRecibidoColones - montoColones));
+    vuelto = isUsd ? roundMoney(vueltoColones / tipoCambioUtilizado) : vueltoColones;
+  }
 
   return {
     moneda,
@@ -602,6 +622,130 @@ async function resolvePedidoPayment(pagoInput) {
     montoRecibido: montoRecibidoColones,
     vuelto,
     tipoCambioUtilizado,
+  };
+}
+
+function isNoCashReceivedMethod(methodName) {
+  const normalized = normalizeUpper(methodName)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  return normalized.includes("TARJETA") || normalized.includes("SINPE") || normalized.includes("TRANSFERENCIA");
+}
+
+async function syncCuentaEstadoByPayments(cuentaId, pedidoId, connection) {
+  if (!cuentaId) {
+    return null;
+  }
+
+  const cuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId, connection);
+  if (!cuenta) {
+    return null;
+  }
+
+  const totalPagadoCuenta = roundMoney(await sumPagosByCuentaPedidoId(cuentaId, connection));
+  const nextEstado = totalPagadoCuenta + 0.009 >= roundMoney(Number(cuenta.total)) ? "PAGADA" : "ABIERTA";
+
+  if (cuenta.estado !== nextEstado) {
+    await updateCuentaPedido(
+      cuentaId,
+      {
+        subtotal: roundMoney(Number(cuenta.subtotal)),
+        impuesto: roundMoney(Number(cuenta.impuesto)),
+        descuento: roundMoney(Number(cuenta.descuento || 0)),
+        total: roundMoney(Number(cuenta.total)),
+        estado: nextEstado,
+      },
+      connection,
+    );
+  }
+
+  return {
+    ...cuenta,
+    estado: nextEstado,
+    totalPagado: totalPagadoCuenta,
+    saldoPendiente: roundMoney(roundMoney(Number(cuenta.total)) - totalPagadoCuenta),
+  };
+}
+
+async function syncAllCuentasEstadoByPayments(pedidoId, connection) {
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  if (!cuentas.length) {
+    return [];
+  }
+
+  const updated = [];
+  for (const cuenta of cuentas) {
+    const synced = await syncCuentaEstadoByPayments(cuenta.id, pedidoId, connection);
+    if (synced) {
+      updated.push(synced);
+    }
+  }
+
+  return updated;
+}
+
+async function resolveCuentaForIncomingPayment({ pedidoId, requestedCuentaId, montoPagoColones, connection }) {
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  if (!cuentas.length) {
+    return { cuenta: null };
+  }
+
+  const cuentasAbiertas = cuentas.filter((cuenta) => cuenta.estado !== "PAGADA" && cuenta.estado !== "CANCELADA");
+
+  if (!cuentasAbiertas.length) {
+    return { error: { status: 409, message: "Todas las cuentas del pedido ya estan cerradas" } };
+  }
+
+  if (requestedCuentaId != null) {
+    const cuenta = await findCuentaByIdAndPedido(requestedCuentaId, pedidoId, connection);
+    if (!cuenta) {
+      return { error: { status: 404, message: "Cuenta no encontrada para este pedido" } };
+    }
+
+    if (cuenta.estado === "PAGADA") {
+      return { error: { status: 409, message: "La cuenta seleccionada ya fue pagada" } };
+    }
+
+    if (cuenta.estado === "CANCELADA") {
+      return { error: { status: 409, message: "La cuenta seleccionada esta cancelada" } };
+    }
+
+    return { cuenta };
+  }
+
+  if (cuentasAbiertas.length === 1) {
+    return { cuenta: cuentasAbiertas[0] };
+  }
+
+  const candidates = [];
+  for (const cuenta of cuentasAbiertas) {
+    const totalPagado = roundMoney(await sumPagosByCuentaPedidoId(cuenta.id, connection));
+    const saldoPendiente = roundMoney(roundMoney(Number(cuenta.total)) - totalPagado);
+
+    if (Math.abs(saldoPendiente - roundMoney(montoPagoColones)) <= 0.009) {
+      candidates.push(cuenta);
+    }
+  }
+
+  if (candidates.length === 1) {
+    return { cuenta: candidates[0] };
+  }
+
+  if (candidates.length > 1) {
+    return {
+      error: {
+        status: 409,
+        message: "El pago coincide con multiples cuentas. Debes indicar cuentaPedidoId",
+      },
+    };
+  }
+
+  return {
+    error: {
+      status: 409,
+      message: "Debes indicar cuentaPedidoId para evitar cobrar la cuenta equivocada",
+    },
   };
 }
 
@@ -631,6 +775,10 @@ function parseAccountSplitItems(body) {
     ? payload.items
     : Array.isArray(payload.detalles)
       ? payload.detalles
+      : Array.isArray(payload.productos)
+        ? payload.productos
+        : Array.isArray(payload.products)
+          ? payload.products
       : Array.isArray(payload.detailIds)
         ? payload.detailIds.map((detailId) => ({ detailId }))
         : Array.isArray(payload.detalleIds)
@@ -640,10 +788,12 @@ function parseAccountSplitItems(body) {
   return rawItems.map((item) => {
     const source = typeof item === "object" && item !== null ? item : { detailId: item };
     const detailRaw = source.detailId ?? source.detalleId ?? source.id;
+    const productRaw = source.productoId ?? source.producto_id ?? source.productId ?? source.product_id;
     const qtyRaw = source.cantidad ?? source.quantity ?? source.qty;
 
     return {
-      detailId: Number(detailRaw),
+      detailId: detailRaw == null || detailRaw === "" ? null : Number(detailRaw),
+      productoId: productRaw == null || productRaw === "" ? null : Number(productRaw),
       cantidad: qtyRaw == null || qtyRaw === "" ? null : Number(qtyRaw),
     };
   });
@@ -658,10 +808,13 @@ function validateAccountSplitItems(items) {
   }
 
   for (const item of items) {
-    if (!Number.isInteger(item.detailId) || item.detailId <= 0) {
+    const hasDetailId = Number.isInteger(item.detailId) && item.detailId > 0;
+    const hasProductoId = Number.isInteger(item.productoId) && item.productoId > 0;
+
+    if (!hasDetailId && !hasProductoId) {
       return {
         ok: false,
-        message: "Cada item debe incluir detailId valido",
+        message: "Cada item debe incluir detailId o productoId valido",
       };
     }
 
@@ -676,8 +829,113 @@ function validateAccountSplitItems(items) {
   return { ok: true };
 }
 
+async function ensureBaseAccountForPedido({ pedidoId, pedido, servicePercentage, connection }) {
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  if (cuentas.length > 0) {
+    return cuentas[0];
+  }
+
+  const details = await listDetalleByPedidoId(pedidoId, connection);
+  if (!details.length) {
+    return null;
+  }
+
+  const baseAccountId = await createCuentaPedido(
+    {
+      pedidoId,
+      numeroCuenta: 1,
+      subtotal: 0,
+      impuesto: 0,
+      descuento: 0,
+      total: 0,
+      estado: "ABIERTA",
+    },
+    connection,
+  );
+
+  for (const detail of details) {
+    if (detail.cuentaPedidoId == null) {
+      await updateDetallePedido(
+        detail.id,
+        {
+          cuentaPedidoId: baseAccountId,
+          productoId: detail.productoId,
+          cantidad: detail.cantidad,
+          precioUnitario: detail.precioUnitario,
+          subtotal: detail.subtotal,
+          observacion: detail.observacion,
+        },
+        connection,
+      );
+    }
+  }
+
+  await recalculateCuentaTotals(baseAccountId, pedido, servicePercentage, connection);
+
+  return findCuentaByIdAndPedido(baseAccountId, pedidoId, connection);
+}
+
+async function resolveSplitItemsToDetails({ pedidoId, targetCuentaId, items, connection }) {
+  const details = await listDetalleByPedidoId(pedidoId, connection);
+  const detailById = new Map(details.map((detail) => [detail.id, detail]));
+
+  const groupedByProduct = new Map();
+  for (const detail of details) {
+    const list = groupedByProduct.get(detail.productoId) || [];
+    list.push(detail);
+    groupedByProduct.set(detail.productoId, list);
+  }
+
+  const movements = [];
+
+  for (const item of items) {
+    if (Number.isInteger(item.detailId) && item.detailId > 0) {
+      const detail = detailById.get(item.detailId);
+      if (!detail) {
+        throw appError(404, `Detalle ${item.detailId} no encontrado en el pedido`);
+      }
+
+      movements.push({ detailId: detail.id, cantidad: item.cantidad });
+      continue;
+    }
+
+    const productId = item.productoId;
+    const requestedQty = item.cantidad == null ? null : Number(item.cantidad);
+    const candidates = (groupedByProduct.get(productId) || [])
+      .filter((detail) => detail.cuentaPedidoId !== targetCuentaId)
+      .sort((a, b) => a.id - b.id);
+
+    if (!candidates.length) {
+      throw appError(404, `No hay detalles disponibles del producto ${productId} para mover`);
+    }
+
+    let qtyToAllocate = requestedQty;
+    if (qtyToAllocate == null) {
+      for (const candidate of candidates) {
+        movements.push({ detailId: candidate.id, cantidad: Number(candidate.cantidad) });
+      }
+      continue;
+    }
+
+    for (const candidate of candidates) {
+      if (qtyToAllocate <= 0) break;
+
+      const availableQty = Number(candidate.cantidad);
+      const moveQty = Math.min(availableQty, qtyToAllocate);
+      movements.push({ detailId: candidate.id, cantidad: moveQty });
+      qtyToAllocate -= moveQty;
+    }
+
+    if (qtyToAllocate > 0) {
+      throw appError(409, `Cantidad insuficiente del producto ${productId} para mover ${requestedQty}`);
+    }
+  }
+
+  return movements;
+}
+
 async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cantidad, connection }) {
-  const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+  const detail = await findDetalleByIdAndPedido(detailId, pedidoId, connection);
   if (!detail) {
     throw appError(404, `Detalle ${detailId} no encontrado en el pedido`);
   }
@@ -756,15 +1014,29 @@ async function hydratePedido(pedidoId) {
     listCuentasByPedidoId(pedidoId),
   ]);
   const totalPagado = roundMoney(pagos.reduce((acc, item) => acc + Number(item.monto), 0));
+  const totalCobrar = cuentas.length
+    ? roundMoney(cuentas.reduce((acc, cuenta) => acc + Number(cuenta.total || 0), 0))
+    : roundMoney(Number(pedido.total));
 
   return {
     ...pedido,
     detalles,
     pagos,
     cuentas,
+    totalCobrar,
     totalPagado,
-    saldoPendiente: roundMoney(pedido.total - totalPagado),
+    saldoPendiente: roundMoney(totalCobrar - totalPagado),
   };
+}
+
+async function resolvePedidoPayableTotal(pedidoId, pedidoTotal) {
+  const cuentas = await listCuentasByPedidoId(pedidoId);
+  if (!cuentas.length) {
+    return roundMoney(Number(pedidoTotal));
+  }
+
+  const totalCuentas = roundMoney(cuentas.reduce((acc, cuenta) => acc + Number(cuenta.total || 0), 0));
+  return totalCuentas > 0 ? totalCuentas : roundMoney(Number(pedidoTotal));
 }
 
 async function ensurePedidoExists(pedidoId, res) {
@@ -1174,7 +1446,7 @@ async function createPedidoDetailHandler(req, res) {
 
     await connection.commit();
 
-    const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+    const detail = await findDetalleByIdAndPedido(detailId, pedidoId, connection);
     const updatedPedido = await hydratePedido(pedidoId);
 
     res.status(201).json({
@@ -1388,7 +1660,18 @@ async function listPedidoAccountsHandler(req, res) {
     })),
   );
 
-  res.json({ pedidoId, cuentas: cuentasConDetalles });
+  const allDetails = await listDetalleByPedidoId(pedidoId);
+  const unassignedDetails = allDetails.filter((detail) => detail.cuentaPedidoId == null);
+  const unassignedSubtotal = roundMoney(unassignedDetails.reduce((acc, detail) => acc + Number(detail.subtotal || 0), 0));
+
+  res.json({
+    pedidoId,
+    cuentas: cuentasConDetalles,
+    unassigned: {
+      detalles: unassignedDetails,
+      subtotal: unassignedSubtotal,
+    },
+  });
 }
 
 async function createPedidoAccountHandler(req, res) {
@@ -1429,8 +1712,15 @@ async function createPedidoAccountHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    const baseAccount = await ensureBaseAccountForPedido({
+      pedidoId,
+      pedido,
+      servicePercentage,
+      connection,
+    });
+
     const totalCuentas = await countCuentasByPedidoId(pedidoId, connection);
-    const numeroFinal = numeroCuenta || totalCuentas + 1;
+    const numeroFinal = numeroCuenta || Math.max(2, totalCuentas + 1);
 
     const cuentaId = await createCuentaPedido(
       {
@@ -1446,9 +1736,19 @@ async function createPedidoAccountHandler(req, res) {
     );
 
     const affectedAccounts = new Set([cuentaId]);
+    if (baseAccount?.id) {
+      affectedAccounts.add(baseAccount.id);
+    }
 
     if (splitItems.length > 0) {
-      for (const item of splitItems) {
+      const movements = await resolveSplitItemsToDetails({
+        pedidoId,
+        targetCuentaId: cuentaId,
+        items: splitItems,
+        connection,
+      });
+
+      for (const item of movements) {
         const movement = await assignDetailQuantityToCuenta({
           pedidoId,
           cuentaId,
@@ -1523,6 +1823,13 @@ async function assignPedidoAccountDetailsHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    await ensureBaseAccountForPedido({
+      pedidoId,
+      pedido,
+      servicePercentage,
+      connection,
+    });
+
     const cuenta = await findCuentaByIdAndPedido(cuentaId, pedidoId, connection);
     if (!cuenta || cuenta.estado !== "ABIERTA") {
       throw appError(404, "Cuenta no encontrada o no disponible");
@@ -1530,7 +1837,14 @@ async function assignPedidoAccountDetailsHandler(req, res) {
 
     const affectedAccounts = new Set([cuentaId]);
 
-    for (const item of splitItems) {
+    const movements = await resolveSplitItemsToDetails({
+      pedidoId,
+      targetCuentaId: cuentaId,
+      items: splitItems,
+      connection,
+    });
+
+    for (const item of movements) {
       const movement = await assignDetailQuantityToCuenta({
         pedidoId,
         cuentaId,
@@ -1617,7 +1931,7 @@ async function removePedidoAccountDetailHandler(req, res) {
       throw appError(404, "Cuenta no encontrada o no disponible");
     }
 
-    const detail = await findDetalleByIdAndPedido(detailId, pedidoId);
+    const detail = await findDetalleByIdAndPedido(detailId, pedidoId, connection);
     if (!detail) {
       throw appError(404, "Detalle no encontrado");
     }
@@ -1812,12 +2126,14 @@ async function listPedidoPaymentsHandler(req, res) {
 
   const pagos = await listPagosByPedidoId(pedidoId);
   const totalPagado = roundMoney(pagos.reduce((acc, item) => acc + Number(item.monto), 0));
+  const totalPedido = await resolvePedidoPayableTotal(pedidoId, pedido.total);
 
   res.json({
     pedidoId,
     pagos,
+    totalPedido,
     totalPagado,
-    saldoPendiente: roundMoney(Number(pedido.total) - totalPagado),
+    saldoPendiente: roundMoney(totalPedido - totalPagado),
   });
 }
 
@@ -1850,52 +2166,114 @@ async function createPedidoPaymentHandler(req, res) {
     return;
   }
 
-  let paymentPayload;
+  const connection = await pool.getConnection();
+
   try {
-    paymentPayload = await resolvePedidoPayment(pagoInput);
-  } catch (error) {
-    if (error && error.status) {
-      res.status(error.status).json({ message: error.message });
+    await connection.beginTransaction();
+
+    const metodoSinRecibido = isNoCashReceivedMethod(metodoPago.nombre);
+
+    let paymentPayload;
+    try {
+      paymentPayload = await resolvePedidoPayment(pagoInput, { disableReceivedAmount: metodoSinRecibido });
+    } catch (error) {
+      if (error && error.status) {
+        res.status(error.status).json({ message: error.message });
+        await connection.rollback();
+        return;
+      }
+
+      throw error;
+    }
+
+    const cuentaResolution = await resolveCuentaForIncomingPayment({
+      pedidoId,
+      requestedCuentaId: pagoInput.cuentaPedidoId,
+      montoPagoColones: paymentPayload.monto,
+      connection,
+    });
+
+    if (cuentaResolution.error) {
+      res.status(cuentaResolution.error.status).json({ message: cuentaResolution.error.message });
+      await connection.rollback();
       return;
     }
 
-    throw error;
-  }
+    const cuentaPago = cuentaResolution.cuenta;
+    const cuentaPagoId = cuentaPago?.id ?? null;
 
-  const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId));
-  const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(paymentPayload.monto));
+    if (cuentaPago) {
+      const totalPagadoCuentaActual = roundMoney(await sumPagosByCuentaPedidoId(cuentaPago.id, connection));
+      const nuevoTotalCuenta = roundMoney(totalPagadoCuentaActual + roundMoney(paymentPayload.monto));
 
-  if (nuevoTotalPagado > roundMoney(Number(pedido.total)) + 0.009) {
-    res.status(409).json({
-      message: "El pago excede el total del pedido",
-      totalPedido: roundMoney(Number(pedido.total)),
-      totalPagadoActual,
-      montoIntentado: roundMoney(paymentPayload.monto),
+      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + 0.009) {
+        res.status(409).json({
+          message: "El pago excede el total de la cuenta",
+          cuentaId: cuentaPago.id,
+          totalCuenta: roundMoney(Number(cuentaPago.total)),
+          totalPagadoCuentaActual,
+          montoIntentado: roundMoney(paymentPayload.monto),
+        });
+        await connection.rollback();
+        return;
+      }
+    }
+
+    const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId, connection));
+    const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(paymentPayload.monto));
+    const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
+
+    if (nuevoTotalPagado > totalPedidoCobrar + 0.009) {
+      res.status(409).json({
+        message: "El pago excede el total del pedido",
+        totalPedido: totalPedidoCobrar,
+        totalPagadoActual,
+        montoIntentado: roundMoney(paymentPayload.monto),
+        saldoPendienteAntes: roundMoney(totalPedidoCobrar - totalPagadoActual),
+      });
+      await connection.rollback();
+      return;
+    }
+
+    const pagoId = await createPago(
+      {
+        pedidoId,
+        cuentaPedidoId: cuentaPagoId,
+        metodoPagoId: pagoInput.metodoPagoId,
+        monedaId: paymentPayload.moneda.id,
+        tipoCambioId: paymentPayload.tipoCambio?.id || null,
+        monto: paymentPayload.monto,
+        montoRecibido: paymentPayload.montoRecibido,
+        vuelto: paymentPayload.vuelto,
+        tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
+        montoMoneda: paymentPayload.montoMoneda,
+        referencia: pagoInput.referencia,
+      },
+      connection,
+    );
+
+    const cuentasSync = await syncAllCuentasEstadoByPayments(pedidoId, connection);
+    const cuentaActualizada = cuentaPagoId != null
+      ? cuentasSync.find((cuenta) => cuenta.id === cuentaPagoId) || null
+      : null;
+
+    await connection.commit();
+
+    const pago = await findPagoByIdAndPedido(pagoId, pedidoId);
+    const updatedPedido = await hydratePedido(pedidoId);
+
+    res.status(201).json({
+      message: "Pago registrado exitosamente",
+      pago,
+      cuenta: cuentaActualizada,
+      pedido: updatedPedido,
     });
-    return;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-
-  const pagoId = await createPago({
-    pedidoId,
-    metodoPagoId: pagoInput.metodoPagoId,
-    monedaId: paymentPayload.moneda.id,
-    tipoCambioId: paymentPayload.tipoCambio?.id || null,
-    monto: paymentPayload.monto,
-    montoRecibido: paymentPayload.montoRecibido,
-    vuelto: paymentPayload.vuelto,
-    tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
-    montoMoneda: paymentPayload.montoMoneda,
-    referencia: pagoInput.referencia,
-  });
-
-  const pago = await findPagoByIdAndPedido(pagoId, pedidoId);
-  const updatedPedido = await hydratePedido(pedidoId);
-
-  res.status(201).json({
-    message: "Pago registrado exitosamente",
-    pago,
-    pedido: updatedPedido,
-  });
 }
 
 async function updatePedidoPaymentHandler(req, res) {
@@ -1940,52 +2318,144 @@ async function updatePedidoPaymentHandler(req, res) {
     return;
   }
 
-  let paymentPayload;
+  const connection = await pool.getConnection();
+
   try {
-    paymentPayload = await resolvePedidoPayment(pagoInput);
-  } catch (error) {
-    if (error && error.status) {
-      res.status(error.status).json({ message: error.message });
+    await connection.beginTransaction();
+
+    const metodoSinRecibido = isNoCashReceivedMethod(metodoPago.nombre);
+    let cuentaPagoId = pagoInput.cuentaPedidoId;
+    const cuentaAnteriorId = existingPago.cuentaPedidoId ?? null;
+
+    let cuentaPago = null;
+
+    let paymentPayload;
+    try {
+      paymentPayload = await resolvePedidoPayment(pagoInput, { disableReceivedAmount: metodoSinRecibido });
+    } catch (error) {
+      if (error && error.status) {
+        res.status(error.status).json({ message: error.message });
+        await connection.rollback();
+        return;
+      }
+
+      throw error;
+    }
+
+    if (cuentaPagoId == null && cuentaAnteriorId == null) {
+      const cuentaResolution = await resolveCuentaForIncomingPayment({
+        pedidoId,
+        requestedCuentaId: null,
+        montoPagoColones: paymentPayload.monto,
+        connection,
+      });
+
+      if (cuentaResolution.error) {
+        res.status(cuentaResolution.error.status).json({ message: cuentaResolution.error.message });
+        await connection.rollback();
+        return;
+      }
+
+      cuentaPago = cuentaResolution.cuenta;
+      cuentaPagoId = cuentaPago?.id ?? null;
+    } else if (cuentaPagoId != null) {
+      cuentaPago = await findCuentaByIdAndPedido(cuentaPagoId, pedidoId, connection);
+      if (!cuentaPago) {
+        res.status(404).json({ message: "Cuenta no encontrada para este pedido" });
+        await connection.rollback();
+        return;
+      }
+
+      if (cuentaPago.estado === "PAGADA" && cuentaPagoId !== cuentaAnteriorId) {
+        res.status(409).json({ message: "La cuenta destino ya fue pagada" });
+        await connection.rollback();
+        return;
+      }
+
+      if (cuentaPago.estado === "CANCELADA") {
+        res.status(409).json({ message: "La cuenta destino esta cancelada" });
+        await connection.rollback();
+        return;
+      }
+    }
+
+    if (cuentaPago) {
+      const totalPagadoCuentaActual = roundMoney(await sumPagosByCuentaPedidoId(cuentaPago.id, connection));
+      const totalBaseCuenta =
+        cuentaAnteriorId === cuentaPago.id
+          ? roundMoney(totalPagadoCuentaActual - Number(existingPago.monto))
+          : totalPagadoCuentaActual;
+      const nuevoTotalCuenta = roundMoney(totalBaseCuenta + roundMoney(paymentPayload.monto));
+
+      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + 0.009) {
+        res.status(409).json({
+          message: "El pago excede el total de la cuenta",
+          cuentaId: cuentaPago.id,
+          totalCuenta: roundMoney(Number(cuentaPago.total)),
+          totalPagadoCuentaActual: totalBaseCuenta,
+          montoIntentado: roundMoney(paymentPayload.monto),
+        });
+        await connection.rollback();
+        return;
+      }
+    }
+
+    const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId, connection));
+    const totalSinEstePago = roundMoney(totalPagadoActual - Number(existingPago.monto));
+    const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(paymentPayload.monto));
+    const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
+
+    if (nuevoTotalPagado > totalPedidoCobrar + 0.009) {
+      res.status(409).json({
+        message: "El pago excede el total del pedido",
+        totalPedido: totalPedidoCobrar,
+        totalPagadoActual,
+        montoIntentado: roundMoney(paymentPayload.monto),
+        saldoPendienteAntes: roundMoney(totalPedidoCobrar - totalSinEstePago),
+      });
+      await connection.rollback();
       return;
     }
 
-    throw error;
-  }
+    await updatePago(
+      paymentId,
+      {
+        cuentaPedidoId: cuentaPagoId,
+        metodoPagoId: pagoInput.metodoPagoId,
+        monedaId: paymentPayload.moneda.id,
+        tipoCambioId: paymentPayload.tipoCambio?.id || null,
+        monto: paymentPayload.monto,
+        montoRecibido: paymentPayload.montoRecibido,
+        vuelto: paymentPayload.vuelto,
+        tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
+        montoMoneda: paymentPayload.montoMoneda,
+        referencia: pagoInput.referencia,
+      },
+      connection,
+    );
 
-  const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId));
-  const totalSinEstePago = roundMoney(totalPagadoActual - Number(existingPago.monto));
-  const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(paymentPayload.monto));
+    const cuentasSync = await syncAllCuentasEstadoByPayments(pedidoId, connection);
+    const cuentaActualizada = cuentaPagoId != null
+      ? cuentasSync.find((cuenta) => cuenta.id === cuentaPagoId) || null
+      : null;
 
-  if (nuevoTotalPagado > roundMoney(Number(pedido.total)) + 0.009) {
-    res.status(409).json({
-      message: "El pago excede el total del pedido",
-      totalPedido: roundMoney(Number(pedido.total)),
-      totalPagadoActual,
-      montoIntentado: roundMoney(paymentPayload.monto),
+    await connection.commit();
+
+    const pago = await findPagoByIdAndPedido(paymentId, pedidoId);
+    const updatedPedido = await hydratePedido(pedidoId);
+
+    res.json({
+      message: "Pago actualizado exitosamente",
+      pago,
+      cuenta: cuentaActualizada,
+      pedido: updatedPedido,
     });
-    return;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-
-  await updatePago(paymentId, {
-    metodoPagoId: pagoInput.metodoPagoId,
-    monedaId: paymentPayload.moneda.id,
-    tipoCambioId: paymentPayload.tipoCambio?.id || null,
-    monto: paymentPayload.monto,
-    montoRecibido: paymentPayload.montoRecibido,
-    vuelto: paymentPayload.vuelto,
-    tipoCambioUtilizado: paymentPayload.tipoCambioUtilizado,
-    montoMoneda: paymentPayload.montoMoneda,
-    referencia: pagoInput.referencia,
-  });
-
-  const pago = await findPagoByIdAndPedido(paymentId, pedidoId);
-  const updatedPedido = await hydratePedido(pedidoId);
-
-  res.json({
-    message: "Pago actualizado exitosamente",
-    pago,
-    pedido: updatedPedido,
-  });
 }
 
 async function deletePedidoPaymentHandler(req, res) {
@@ -2016,7 +2486,23 @@ async function deletePedidoPaymentHandler(req, res) {
     return;
   }
 
-  await deletePago(paymentId);
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    await deletePago(paymentId, connection);
+
+    await syncAllCuentasEstadoByPayments(pedidoId, connection);
+
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
   const updatedPedido = await hydratePedido(pedidoId);
 
   res.json({

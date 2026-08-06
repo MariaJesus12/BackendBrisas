@@ -52,12 +52,31 @@ EXECUTE stmt_detalle_fk;
 DEALLOCATE PREPARE stmt_detalle_fk;
 
 ALTER TABLE pagos
+  ADD COLUMN IF NOT EXISTS cuenta_pedido_id INT NULL AFTER pedido_id,
   ADD COLUMN IF NOT EXISTS moneda_id INT NULL AFTER metodo_pago_id,
   ADD COLUMN IF NOT EXISTS tipo_cambio_id INT NULL AFTER moneda_id,
   ADD COLUMN IF NOT EXISTS monto_recibido DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER monto,
   ADD COLUMN IF NOT EXISTS vuelto DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER monto_recibido,
   ADD COLUMN IF NOT EXISTS tipo_cambio_utilizado DECIMAL(10,4) NOT NULL DEFAULT 1 AFTER vuelto,
   ADD COLUMN IF NOT EXISTS monto_moneda DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER tipo_cambio_utilizado;
+
+SET @has_fk_pagos_cuenta := (
+  SELECT COUNT(*)
+  FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'pagos'
+    AND CONSTRAINT_NAME = 'fk_pagos_cuenta_pedido'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+
+SET @sql_pagos_cuenta_fk := IF(
+  @has_fk_pagos_cuenta = 0,
+  'ALTER TABLE pagos ADD CONSTRAINT fk_pagos_cuenta_pedido FOREIGN KEY (cuenta_pedido_id) REFERENCES cuentas_pedido(id)',
+  'SELECT 1'
+);
+PREPARE stmt_pagos_cuenta_fk FROM @sql_pagos_cuenta_fk;
+EXECUTE stmt_pagos_cuenta_fk;
+DEALLOCATE PREPARE stmt_pagos_cuenta_fk;
 
 SET @crc_id := (
   SELECT id
@@ -74,6 +93,21 @@ SET
   tipo_cambio_utilizado = CASE WHEN tipo_cambio_utilizado <= 0 THEN 1 ELSE tipo_cambio_utilizado END,
   monto_moneda = CASE WHEN monto_moneda <= 0 THEN monto ELSE monto_moneda END,
   vuelto = CASE WHEN vuelto < 0 THEN 0 ELSE vuelto END;
+
+UPDATE cuentas_pedido cp
+LEFT JOIN (
+  SELECT
+    cuenta_pedido_id,
+    COALESCE(SUM(monto), 0) AS total_pagado
+  FROM pagos
+  WHERE cuenta_pedido_id IS NOT NULL
+  GROUP BY cuenta_pedido_id
+) pg ON pg.cuenta_pedido_id = cp.id
+SET cp.estado = CASE
+  WHEN cp.estado = 'CANCELADA' THEN 'CANCELADA'
+  WHEN COALESCE(pg.total_pagado, 0) + 0.009 >= cp.total THEN 'PAGADA'
+  ELSE 'ABIERTA'
+END;
 
 SET @has_fk_pagos_moneda := (
   SELECT COUNT(*)
