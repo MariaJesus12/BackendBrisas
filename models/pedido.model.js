@@ -9,11 +9,19 @@ function toMoney(value) {
 }
 
 function toPedido(row) {
+  const estado = String(row.estado || "").trim().toUpperCase();
+  const canDelete = ["BORRADOR", "CANCELADO"].includes(estado);
+  const canReprintKitchen = ["COCINA", "FACTURADO", "CERRADO"].includes(estado);
+  const canReprintFactura = ["FACTURADO", "CERRADO"].includes(estado);
+
   return {
     id: row.id,
     codigo: row.codigo,
     mesaId: row.mesa_id,
     mesaNumero: row.mesa_numero,
+    clienteId: row.cliente_id,
+    clienteNombre: row.cliente_nombre,
+    clienteTelefono: row.cliente_telefono,
     usuarioId: row.usuario_id,
     usuarioNombre: row.usuario_nombre,
     tipo: row.tipo,
@@ -21,8 +29,17 @@ function toPedido(row) {
     subtotal: toMoney(row.subtotal),
     impuesto: toMoney(row.impuesto),
     total: toMoney(row.total),
+    createdAt: row.fecha_apertura,
     fechaApertura: row.fecha_apertura,
     fechaCierre: row.fecha_cierre,
+    actions: {
+      canView: true,
+      canDelete,
+      canReprint: canReprintKitchen || canReprintFactura,
+      canReprintKitchen,
+      canReprintFactura,
+      preferredReprintType: canReprintFactura ? "FACTURA" : canReprintKitchen ? "COCINA" : null,
+    },
   };
 }
 
@@ -144,7 +161,7 @@ async function getSchemaCapabilities(connection, forceRefresh = false) {
   return schemaCapabilitiesCache;
 }
 
-async function listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaHasta } = {}) {
+async function listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta } = {}) {
   const filters = [];
   const params = [];
 
@@ -161,6 +178,11 @@ async function listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaH
   if (mesaId) {
     filters.push("p.mesa_id = ?");
     params.push(mesaId);
+  }
+
+  if (clienteId) {
+    filters.push("p.cliente_id = ?");
+    params.push(clienteId);
   }
 
   if (usuarioId) {
@@ -187,6 +209,9 @@ async function listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaH
       p.codigo,
       p.mesa_id,
       m.numero AS mesa_numero,
+      p.cliente_id,
+      c.nombre AS cliente_nombre,
+      c.telefono AS cliente_telefono,
       p.usuario_id,
       u.nombre AS usuario_nombre,
       p.tipo,
@@ -198,6 +223,7 @@ async function listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaH
       p.fecha_cierre
     FROM pedidos p
     LEFT JOIN mesas m ON m.id = p.mesa_id
+    LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN usuarios u ON u.id = p.usuario_id
     ${whereClause}
     ORDER BY p.id DESC
@@ -216,6 +242,9 @@ async function findPedidoById(pedidoId) {
       p.codigo,
       p.mesa_id,
       m.numero AS mesa_numero,
+      p.cliente_id,
+      c.nombre AS cliente_nombre,
+      c.telefono AS cliente_telefono,
       p.usuario_id,
       u.nombre AS usuario_nombre,
       p.tipo,
@@ -227,6 +256,7 @@ async function findPedidoById(pedidoId) {
       p.fecha_cierre
     FROM pedidos p
     LEFT JOIN mesas m ON m.id = p.mesa_id
+    LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN usuarios u ON u.id = p.usuario_id
     WHERE p.id = ?
     LIMIT 1
@@ -304,15 +334,27 @@ async function getNextPedidoCodeForDate(fechaApertura, connection) {
 }
 
 async function createPedido(
-  { codigo, mesaId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre },
+  { codigo, mesaId, clienteId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre },
   connection,
 ) {
   const result = await run(
     `
-    INSERT INTO pedidos (codigo, mesa_id, usuario_id, tipo, estado, subtotal, impuesto, total, fecha_apertura, fecha_cierre)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()), ?)
+    INSERT INTO pedidos (
+      codigo,
+      mesa_id,
+      cliente_id,
+      usuario_id,
+      tipo,
+      estado,
+      subtotal,
+      impuesto,
+      total,
+      fecha_apertura,
+      fecha_cierre
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()), ?)
     `,
-    [codigo, mesaId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre],
+    [codigo, mesaId, clienteId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre],
     connection,
   );
 
@@ -321,7 +363,7 @@ async function createPedido(
 
 async function updatePedido(
   pedidoId,
-  { codigo, mesaId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre },
+  { codigo, mesaId, clienteId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre },
   connection,
 ) {
   const result = await run(
@@ -330,6 +372,7 @@ async function updatePedido(
     SET
       codigo = ?,
       mesa_id = ?,
+      cliente_id = ?,
       usuario_id = ?,
       tipo = ?,
       estado = ?,
@@ -340,7 +383,7 @@ async function updatePedido(
       fecha_cierre = ?
     WHERE id = ?
     `,
-    [codigo, mesaId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre, pedidoId],
+    [codigo, mesaId, clienteId, usuarioId, tipo, estado, subtotal, impuesto, total, fechaApertura, fechaCierre, pedidoId],
     connection,
   );
 

@@ -39,7 +39,9 @@ const {
 } = require("../models/pedido.model");
 const { findConfiguracionByClave } = require("../models/configuracion.model");
 const { findMonedaByCode, findMonedaById, listMonedas } = require("../models/moneda.model");
+const { findActiveClienteById } = require("../models/cliente.model");
 const { findProductById } = require("../models/product.model");
+const { findActiveReservaByMesaAt } = require("../models/reserva.model");
 const { findLatestActiveTipoCambio, findTipoCambioById } = require("../models/tipo-cambio.model");
 const { findUserById } = require("../models/user.model");
 
@@ -136,6 +138,23 @@ function parseDateTime(value) {
   return date;
 }
 
+function toMySqlDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
 function formatDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
 
@@ -159,6 +178,14 @@ function formatMoney(value) {
 function getPedidoDestinoLabel(pedido) {
   if (pedido.tipo === "MESA") {
     return `MESA ${pedido.mesaNumero || pedido.mesaId}`;
+  }
+
+  if (pedido.clienteNombre) {
+    return `PARA LLEVAR - ${pedido.clienteNombre}`;
+  }
+
+  if (pedido.clienteId) {
+    return `PARA LLEVAR - CLIENTE ${pedido.clienteId}`;
   }
 
   return "PARA LLEVAR";
@@ -252,11 +279,13 @@ async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copi
 
 function parsePedidoCreateInput(body, authUser) {
   const mesaRaw = body.mesaId ?? body.mesa_id;
+  const clienteRaw = body.clienteId ?? body.cliente_id;
   const usuarioRaw = body.usuarioId ?? body.usuario_id ?? authUser?.id;
 
   return {
     codigo: "",
     mesaId: mesaRaw == null || mesaRaw === "" ? null : Number(mesaRaw),
+    clienteId: clienteRaw == null || clienteRaw === "" ? null : Number(clienteRaw),
     usuarioId: Number(usuarioRaw),
     tipo: normalizeUpper(body.tipo),
     estado: normalizeUpper(body.estado || "BORRADOR"),
@@ -271,6 +300,8 @@ function parsePedidoCreateInput(body, authUser) {
 function parsePedidoUpdateInput(body, existingPedido) {
   const hasMesaId = Object.prototype.hasOwnProperty.call(body, "mesaId");
   const hasMesaIdAlias = Object.prototype.hasOwnProperty.call(body, "mesa_id");
+  const hasClienteId = Object.prototype.hasOwnProperty.call(body, "clienteId");
+  const hasClienteIdAlias = Object.prototype.hasOwnProperty.call(body, "cliente_id");
   const hasUsuarioId = Object.prototype.hasOwnProperty.call(body, "usuarioId");
   const hasUsuarioIdAlias = Object.prototype.hasOwnProperty.call(body, "usuario_id");
   const hasFechaApertura = Object.prototype.hasOwnProperty.call(body, "fechaApertura");
@@ -279,11 +310,13 @@ function parsePedidoUpdateInput(body, existingPedido) {
   const hasFechaCierreAlias = Object.prototype.hasOwnProperty.call(body, "fecha_cierre");
 
   const mesaRaw = hasMesaId ? body.mesaId : hasMesaIdAlias ? body.mesa_id : existingPedido.mesaId;
+  const clienteRaw = hasClienteId ? body.clienteId : hasClienteIdAlias ? body.cliente_id : existingPedido.clienteId;
   const usuarioRaw = hasUsuarioId ? body.usuarioId : hasUsuarioIdAlias ? body.usuario_id : existingPedido.usuarioId;
 
   return {
     codigo: existingPedido.codigo,
     mesaId: mesaRaw == null || mesaRaw === "" ? null : Number(mesaRaw),
+    clienteId: clienteRaw == null || clienteRaw === "" ? null : Number(clienteRaw),
     usuarioId: Number(usuarioRaw),
     tipo: Object.prototype.hasOwnProperty.call(body, "tipo") ? normalizeUpper(body.tipo) : existingPedido.tipo,
     estado: Object.prototype.hasOwnProperty.call(body, "estado")
@@ -318,6 +351,18 @@ function validatePedidoInput(input) {
     missingFields.push("mesaId");
   }
 
+  if (input.tipo === "LLEVAR" && (!Number.isInteger(input.clienteId) || input.clienteId <= 0)) {
+    missingFields.push("clienteId");
+  }
+
+  if (
+    input.tipo === "MESA" &&
+    input.clienteId != null &&
+    (!Number.isInteger(input.clienteId) || input.clienteId <= 0)
+  ) {
+    missingFields.push("clienteId");
+  }
+
   if (input.codigo && input.codigo.length > 30) {
     return {
       ok: false,
@@ -335,6 +380,7 @@ function validatePedidoInput(input) {
         missingFields,
         acceptedAliases: {
           mesaId: ["mesaId", "mesa_id"],
+          clienteId: ["clienteId", "cliente_id"],
           usuarioId: ["usuarioId", "usuario_id"],
           fechaApertura: ["fechaApertura", "fecha_apertura"],
           fechaCierre: ["fechaCierre", "fecha_cierre"],
@@ -1053,6 +1099,8 @@ async function listPedidosHandler(req, res) {
   const estado = req.query.estado ? normalizeUpper(req.query.estado) : undefined;
   const tipo = req.query.tipo ? normalizeUpper(req.query.tipo) : undefined;
   const mesaId = req.query.mesaId ? Number(req.query.mesaId) : undefined;
+  const clienteIdRaw = req.query.clienteId ?? req.query.cliente_id;
+  const clienteId = clienteIdRaw == null || clienteIdRaw === "" ? undefined : Number(clienteIdRaw);
   const usuarioId = req.query.usuarioId ? Number(req.query.usuarioId) : undefined;
   const fechaDesde = req.query.fechaDesde ? String(req.query.fechaDesde) : undefined;
   const fechaHasta = req.query.fechaHasta ? String(req.query.fechaHasta) : undefined;
@@ -1077,7 +1125,12 @@ async function listPedidosHandler(req, res) {
     return;
   }
 
-  const pedidos = await listPedidos({ estado, tipo, mesaId, usuarioId, fechaDesde, fechaHasta });
+  if (clienteIdRaw != null && clienteIdRaw !== "" && (!Number.isInteger(clienteId) || clienteId <= 0)) {
+    res.status(400).json({ message: "clienteId invalido" });
+    return;
+  }
+
+  const pedidos = await listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta });
   res.json({ pedidos });
 }
 
@@ -1111,10 +1164,29 @@ async function createPedidoHandler(req, res) {
     input.mesaId = null;
   }
 
+  if (input.tipo === "MESA" && input.clienteId == null) {
+    input.clienteId = null;
+  }
+
   if (input.tipo === "MESA") {
     const mesa = await findMesaById(input.mesaId);
     if (!mesa || !mesa.activa) {
       res.status(400).json({ message: "mesaId invalido o mesa inactiva" });
+      return;
+    }
+
+    const referenceDateTime = toMySqlDateTime(input.fechaApertura || new Date());
+    const activeReserva = await findActiveReservaByMesaAt({
+      mesaId: input.mesaId,
+      referenceDateTime,
+    });
+
+    if (activeReserva) {
+      res.status(409).json({
+        message: "La mesa esta reservada para el horario solicitado",
+        mesaId: input.mesaId,
+        reserva: activeReserva,
+      });
       return;
     }
   }
@@ -1123,6 +1195,14 @@ async function createPedidoHandler(req, res) {
   if (!user || !user.activo) {
     res.status(400).json({ message: "usuarioId invalido o usuario inactivo" });
     return;
+  }
+
+  if (input.clienteId != null) {
+    const cliente = await findActiveClienteById(input.clienteId);
+    if (!cliente) {
+      res.status(400).json({ message: "clienteId invalido o cliente inactivo" });
+      return;
+    }
   }
 
   const normalizedDetalles = [];
@@ -1155,6 +1235,7 @@ async function createPedidoHandler(req, res) {
       {
         codigo: generatedCode,
         mesaId: input.mesaId,
+        clienteId: input.clienteId,
         usuarioId: input.usuarioId,
         tipo: input.tipo,
         estado: input.estado,
@@ -1251,11 +1332,34 @@ async function updatePedidoHandler(req, res) {
     input.mesaId = null;
   }
 
+  if (input.tipo === "MESA" && input.clienteId == null) {
+    input.clienteId = null;
+  }
+
   if (input.tipo === "MESA") {
     const mesa = await findMesaById(input.mesaId);
     if (!mesa || !mesa.activa) {
       res.status(400).json({ message: "mesaId invalido o mesa inactiva" });
       return;
+    }
+
+    const isAssigningMesa = existingPedido.tipo !== "MESA" || existingPedido.mesaId !== input.mesaId;
+
+    if (isAssigningMesa) {
+      const referenceDateTime = toMySqlDateTime(input.fechaApertura || existingPedido.fechaApertura || new Date());
+      const activeReserva = await findActiveReservaByMesaAt({
+        mesaId: input.mesaId,
+        referenceDateTime,
+      });
+
+      if (activeReserva) {
+        res.status(409).json({
+          message: "La mesa esta reservada para el horario solicitado",
+          mesaId: input.mesaId,
+          reserva: activeReserva,
+        });
+        return;
+      }
     }
   }
 
@@ -1263,6 +1367,14 @@ async function updatePedidoHandler(req, res) {
   if (!user || !user.activo) {
     res.status(400).json({ message: "usuarioId invalido o usuario inactivo" });
     return;
+  }
+
+  if (input.clienteId != null) {
+    const cliente = await findActiveClienteById(input.clienteId);
+    if (!cliente) {
+      res.status(400).json({ message: "clienteId invalido o cliente inactivo" });
+      return;
+    }
   }
 
   const subtotal = roundMoney(await sumDetalleSubtotalByPedido(pedidoId));
@@ -1289,6 +1401,7 @@ async function updatePedidoHandler(req, res) {
   await updatePedido(pedidoId, {
     codigo: input.codigo,
     mesaId: input.mesaId,
+    clienteId: input.clienteId,
     usuarioId: input.usuarioId,
     tipo: input.tipo,
     estado: input.estado,
@@ -2171,6 +2284,8 @@ async function createPedidoPaymentHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    const servicePercentage = await getServicePercentage();
+
     const metodoSinRecibido = isNoCashReceivedMethod(metodoPago.nombre);
 
     let paymentPayload;
@@ -2199,8 +2314,26 @@ async function createPedidoPaymentHandler(req, res) {
       return;
     }
 
-    const cuentaPago = cuentaResolution.cuenta;
+    let cuentaPago = cuentaResolution.cuenta;
+
+    if (!cuentaPago) {
+      cuentaPago = await ensureBaseAccountForPedido({
+        pedidoId,
+        pedido,
+        servicePercentage,
+        connection,
+      });
+    }
+
     const cuentaPagoId = cuentaPago?.id ?? null;
+
+    if (cuentaPagoId == null) {
+      res.status(409).json({
+        message: "No se pudo determinar la cuenta a pagar para este pedido",
+      });
+      await connection.rollback();
+      return;
+    }
 
     if (cuentaPago) {
       const totalPagadoCuentaActual = roundMoney(await sumPagosByCuentaPedidoId(cuentaPago.id, connection));
@@ -2323,6 +2456,8 @@ async function updatePedidoPaymentHandler(req, res) {
   try {
     await connection.beginTransaction();
 
+    const servicePercentage = await getServicePercentage();
+
     const metodoSinRecibido = isNoCashReceivedMethod(metodoPago.nombre);
     let cuentaPagoId = pagoInput.cuentaPedidoId;
     const cuentaAnteriorId = existingPago.cuentaPedidoId ?? null;
@@ -2343,9 +2478,16 @@ async function updatePedidoPaymentHandler(req, res) {
     }
 
     if (cuentaPagoId == null && cuentaAnteriorId == null) {
+      const cuentaBase = await ensureBaseAccountForPedido({
+        pedidoId,
+        pedido,
+        servicePercentage,
+        connection,
+      });
+
       const cuentaResolution = await resolveCuentaForIncomingPayment({
         pedidoId,
-        requestedCuentaId: null,
+        requestedCuentaId: cuentaBase?.id ?? null,
         montoPagoColones: paymentPayload.monto,
         connection,
       });
@@ -2377,6 +2519,14 @@ async function updatePedidoPaymentHandler(req, res) {
         await connection.rollback();
         return;
       }
+    }
+
+    if (cuentaPagoId == null) {
+      res.status(409).json({
+        message: "No se pudo determinar la cuenta a actualizar para este pago",
+      });
+      await connection.rollback();
+      return;
     }
 
     if (cuentaPago) {
@@ -2578,6 +2728,7 @@ async function sendPedidoToKitchenHandler(req, res) {
         {
           codigo: pedidoState.codigo,
           mesaId: pedidoState.mesaId,
+          clienteId: pedidoState.clienteId,
           usuarioId: pedidoState.usuarioId,
           tipo: pedidoState.tipo,
           estado: nextState,
@@ -2689,6 +2840,7 @@ async function facturarPedidoHandler(req, res) {
       {
         codigo: pedidoState.codigo,
         mesaId: pedidoState.mesaId,
+        clienteId: pedidoState.clienteId,
         usuarioId: pedidoState.usuarioId,
         tipo: pedidoState.tipo,
         estado: "FACTURADO",
@@ -2874,6 +3026,86 @@ async function reprintPedidoFacturaHandler(req, res) {
   }
 }
 
+async function reprintPedidoHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const pedido = await hydratePedido(pedidoId);
+  if (!pedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  if (!pedido.detalles.length) {
+    res.status(409).json({ message: "El pedido no tiene detalles para reimprimir" });
+    return;
+  }
+
+  const body = req.body || {};
+  const copias = body.copias == null ? 1 : Number(body.copias);
+  const tipoRaw = String(body.tipo || "AUTO").trim().toUpperCase();
+
+  if (!Number.isInteger(copias) || copias <= 0) {
+    res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  let tipo = tipoRaw;
+  if (tipo === "AUTO") {
+    tipo = ["FACTURADO", "CERRADO"].includes(pedido.estado) ? "FACTURA" : "COCINA";
+  }
+
+  if (!["COCINA", "FACTURA"].includes(tipo)) {
+    res.status(400).json({
+      message: "tipo invalido",
+      acceptedTipos: ["AUTO", "COCINA", "FACTURA"],
+    });
+    return;
+  }
+
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const jobId = await queuePedidoPrint(
+      {
+        pedido,
+        tipo,
+        usuarioId: req.authUser.id,
+        reimpresion: 1,
+        copias,
+      },
+      connection,
+    );
+
+    await connection.commit();
+
+    const printJob = await findColaImpresionById(jobId);
+
+    res.status(201).json({
+      message: `Reimpresion ${tipo.toLowerCase()} encolada exitosamente`,
+      tipo,
+      pedido,
+      printJob,
+    });
+  } catch (error) {
+    await connection.rollback();
+
+    if (error && error.status) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 module.exports = {
   listPedidosHandler,
   getPedidoByIdHandler,
@@ -2896,6 +3128,7 @@ module.exports = {
   listPaymentMethodsHandler,
   sendPedidoToKitchenHandler,
   facturarPedidoHandler,
+  reprintPedidoHandler,
   reprintPedidoKitchenHandler,
   reprintPedidoFacturaHandler,
 };

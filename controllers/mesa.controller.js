@@ -2,10 +2,40 @@ const {
   createMesa,
   findMesaById,
   findMesaByNumero,
-  listMesas,
   softDeleteMesa,
   updateMesa,
 } = require("../models/mesa.model");
+const { listMesasReservationStatus } = require("../models/reserva.model");
+
+function parseDateTimeInput(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+}
+
+function toMySqlDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
 
 function parseMesaInput(body) {
   return {
@@ -46,8 +76,25 @@ function validateMesaInput(mesa) {
 
 async function listMesasHandler(req, res) {
   const onlyActive = req.query.active === "1" || req.query.active === "true";
-  const mesas = await listMesas({ onlyActive });
-  res.json({ mesas });
+  const referenceDateTime = req.query.at ? parseDateTimeInput(req.query.at) : new Date();
+
+  if (!referenceDateTime) {
+    res.status(400).json({
+      message: "Parametro at invalido",
+      hint: "Usa formato ISO, por ejemplo 2026-08-07T15:00:00",
+    });
+    return;
+  }
+
+  const mesas = await listMesasReservationStatus({
+    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    onlyActiveMesas: onlyActive,
+  });
+
+  res.json({
+    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    mesas,
+  });
 }
 
 async function getMesaByIdHandler(req, res) {
@@ -63,7 +110,30 @@ async function getMesaByIdHandler(req, res) {
     return;
   }
 
-  res.json({ mesa });
+  const referenceDateTime = req.query.at ? parseDateTimeInput(req.query.at) : new Date();
+  if (!referenceDateTime) {
+    res.status(400).json({
+      message: "Parametro at invalido",
+      hint: "Usa formato ISO, por ejemplo 2026-08-07T15:00:00",
+    });
+    return;
+  }
+
+  const mesasWithStatus = await listMesasReservationStatus({
+    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    onlyActiveMesas: false,
+  });
+
+  const mesaWithStatus = mesasWithStatus.find((item) => item.id === mesaId) || {
+    ...mesa,
+    reservada: false,
+    reservaActiva: null,
+  };
+
+  res.json({
+    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    mesa: mesaWithStatus,
+  });
 }
 
 async function createMesaHandler(req, res) {
