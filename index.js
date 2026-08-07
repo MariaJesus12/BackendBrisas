@@ -81,6 +81,6 @@ app.get("/health/db", async (_req, res) => {
   }
 });
 
-app.listen(env.port, () => {
-  console.log(`Server listening on http://localhost:${env.port}`);
+app.listen(env.port, "0.0.0.0", () => {
+    console.log(`Server listening on port ${env.port}`);
 });
