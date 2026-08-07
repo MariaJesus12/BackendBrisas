@@ -48,7 +48,8 @@ const { findUserById } = require("../models/user.model");
 const PEDIDO_TIPOS = new Set(["MESA", "LLEVAR"]);
 const PEDIDO_ESTADOS = new Set(["BORRADOR", "COCINA", "FACTURADO", "CERRADO", "CANCELADO"]);
 const MONEY_EPSILON = 0.009;
-const SETTLEMENT_TOLERANCE = 1;
+const SETTLEMENT_TOLERANCE = 5;
+const PAYMENT_OVERAGE_TOLERANCE = 5;
 
 function roundMoney(value) {
   return Math.round(Number(value) * 100) / 100;
@@ -652,15 +653,27 @@ async function resolvePedidoPayment(pagoInput, { disableReceivedAmount = false }
   let montoMoneda = 0;
 
   if (isUsd) {
-    // For USD flows, prefer montoMoneda when present. Many frontends send both
-    // fields using the selected currency and monto can otherwise be misread as CRC.
-    if (hasMontoMoneda) {
-      montoMoneda = roundMoney(pagoInput.montoMoneda);
-      montoColones = roundMoney(montoMoneda * tipoCambioUtilizado);
-    } else {
-      montoColones = roundMoney(pagoInput.monto);
-      montoMoneda = roundMoney(montoColones / tipoCambioUtilizado);
+    // In USD mode, the entered amount should be treated as USD unless the
+    // caller explicitly sends the dedicated converted field.
+    const montoMonedaOriginal = hasMontoMoneda
+      ? Number(pagoInput.montoMoneda)
+      : hasMonto
+        ? Number(pagoInput.monto)
+        : 0;
+
+    if (!Number.isFinite(montoMonedaOriginal) || montoMonedaOriginal <= 0) {
+      throw appError(400, "El monto calculado es invalido");
     }
+
+    if (hasMontoMoneda) {
+      montoMoneda = roundMoney(montoMonedaOriginal);
+    } else if (hasMonto) {
+      montoMoneda = roundMoney(montoMonedaOriginal);
+    } else {
+      montoMoneda = 0;
+    }
+
+    montoColones = roundMoney(montoMonedaOriginal * tipoCambioUtilizado);
   } else {
     montoColones = roundMoney(hasMonto ? pagoInput.monto : pagoInput.montoMoneda);
     montoMoneda = montoColones;
@@ -679,9 +692,9 @@ async function resolvePedidoPayment(pagoInput, { disableReceivedAmount = false }
 
     if (isUsd) {
       if (hasMontoRecibidoMoneda) {
-        montoRecibidoColones = roundMoney(pagoInput.montoRecibidoMoneda * tipoCambioUtilizado);
+        montoRecibidoColones = roundMoney(Number(pagoInput.montoRecibidoMoneda) * tipoCambioUtilizado);
       } else if (hasMontoRecibido) {
-        montoRecibidoColones = roundMoney(pagoInput.montoRecibido);
+        montoRecibidoColones = roundMoney(Number(pagoInput.montoRecibido) * tipoCambioUtilizado);
       }
     } else if (hasMontoRecibido || hasMontoRecibidoMoneda) {
       montoRecibidoColones = roundMoney(hasMontoRecibido ? pagoInput.montoRecibido : pagoInput.montoRecibidoMoneda);
@@ -764,6 +777,19 @@ async function syncAllCuentasEstadoByPayments(pedidoId, connection) {
   }
 
   return updated;
+}
+
+async function decorateCuentaWithLivePaymentState(cuenta, pedidoId, connection) {
+  const totalPagado = roundMoney(await sumPagosByCuentaPedidoId(cuenta.id, connection));
+  const saldoPendiente = roundMoney(Number(cuenta.total) - totalPagado);
+  const estado = isSettled(cuenta.total, totalPagado) ? "PAGADA" : "ABIERTA";
+
+  return {
+    ...cuenta,
+    estado,
+    totalPagado,
+    saldoPendiente: normalizeSaldo(saldoPendiente),
+  };
 }
 
 async function resolveCuentaForIncomingPayment({ pedidoId, requestedCuentaId, montoPagoColones, connection }) {
@@ -1861,12 +1887,19 @@ async function listPedidoAccountsHandler(req, res) {
   const pedido = await ensurePedidoExists(pedidoId, res);
   if (!pedido) return;
 
+  const connection = await pool.getConnection();
+
+  try {
   const cuentas = await listCuentasByPedidoId(pedidoId);
   const cuentasConDetalles = await Promise.all(
-    cuentas.map(async (cuenta) => ({
-      ...cuenta,
-      detalles: await listDetalleByCuentaPedidoId(cuenta.id),
-    })),
+    cuentas.map(async (cuenta) => {
+      const cuentaConEstado = await decorateCuentaWithLivePaymentState(cuenta, pedidoId, connection);
+
+      return {
+        ...cuentaConEstado,
+        detalles: await listDetalleByCuentaPedidoId(cuenta.id),
+      };
+    }),
   );
 
   const allDetails = await listDetalleByPedidoId(pedidoId);
@@ -1881,6 +1914,9 @@ async function listPedidoAccountsHandler(req, res) {
       subtotal: unassignedSubtotal,
     },
   });
+  } finally {
+    connection.release();
+  }
 }
 
 async function createPedidoAccountHandler(req, res) {
@@ -2435,7 +2471,9 @@ async function createPedidoPaymentHandler(req, res) {
       const totalPagadoCuentaActual = roundMoney(await sumPagosByCuentaPedidoId(cuentaPago.id, connection));
       const nuevoTotalCuenta = roundMoney(totalPagadoCuentaActual + roundMoney(paymentPayload.monto));
 
-      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + MONEY_EPSILON) {
+      const cuentaTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
+
+      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + cuentaTolerance) {
         res.status(409).json({
           message: "El pago excede el total de la cuenta",
           cuentaId: cuentaPago.id,
@@ -2452,7 +2490,9 @@ async function createPedidoPaymentHandler(req, res) {
     const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(paymentPayload.monto));
     const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
 
-    if (nuevoTotalPagado > totalPedidoCobrar + MONEY_EPSILON) {
+    const pedidoTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
+
+    if (nuevoTotalPagado > totalPedidoCobrar + pedidoTolerance) {
       res.status(409).json({
         message: "El pago excede el total del pedido",
         totalPedido: totalPedidoCobrar,
@@ -2633,7 +2673,9 @@ async function updatePedidoPaymentHandler(req, res) {
           : totalPagadoCuentaActual;
       const nuevoTotalCuenta = roundMoney(totalBaseCuenta + roundMoney(paymentPayload.monto));
 
-      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + MONEY_EPSILON) {
+      const cuentaTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
+
+      if (nuevoTotalCuenta > roundMoney(Number(cuentaPago.total)) + cuentaTolerance) {
         res.status(409).json({
           message: "El pago excede el total de la cuenta",
           cuentaId: cuentaPago.id,
@@ -2651,7 +2693,9 @@ async function updatePedidoPaymentHandler(req, res) {
     const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(paymentPayload.monto));
     const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
 
-    if (nuevoTotalPagado > totalPedidoCobrar + MONEY_EPSILON) {
+    const pedidoTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
+
+    if (nuevoTotalPagado > totalPedidoCobrar + pedidoTolerance) {
       res.status(409).json({
         message: "El pago excede el total del pedido",
         totalPedido: totalPedidoCobrar,
