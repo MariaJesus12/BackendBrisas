@@ -146,8 +146,15 @@ async function getSchemaCapabilities(connection, forceRefresh = false) {
   );
 
   const hasColumn = (tableName, columnName) =>
-    columnRows.some((row) => row.TABLE_NAME === tableName && row.COLUMN_NAME === columnName);
-  const hasTable = (tableName) => tableRows.some((row) => row.TABLE_NAME === tableName);
+    columnRows.some(
+      (row) =>
+        String(row.TABLE_NAME || "").toLowerCase() === String(tableName || "").toLowerCase() &&
+        String(row.COLUMN_NAME || "").toLowerCase() === String(columnName || "").toLowerCase(),
+    );
+  const hasTable = (tableName) =>
+    tableRows.some(
+      (row) => String(row.TABLE_NAME || "").toLowerCase() === String(tableName || "").toLowerCase(),
+    );
 
   schemaCapabilitiesCache = {
     hasDetalleCuentaPedidoId: hasColumn("detalle_pedido", "cuenta_pedido_id"),

@@ -13,12 +13,7 @@ const configuracionRestauranteRouter = express.Router();
 
 configuracionRestauranteRouter.get("/", getCurrentConfiguracionRestauranteHandler);
 
-configuracionRestauranteRouter.get(
-  "/all",
-  requireAuth,
-  requireRoles("ADMIN"),
-  listConfiguracionesRestauranteHandler,
-);
+configuracionRestauranteRouter.get("/all", listConfiguracionesRestauranteHandler);
 
 configuracionRestauranteRouter.get("/:id", getConfiguracionRestauranteByIdHandler);
 
