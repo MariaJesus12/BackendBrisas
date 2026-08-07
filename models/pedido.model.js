@@ -13,6 +13,8 @@ function toPedido(row) {
   const canDelete = ["BORRADOR", "CANCELADO"].includes(estado);
   const canReprintKitchen = ["COCINA", "FACTURADO", "CERRADO"].includes(estado);
   const canReprintFactura = ["FACTURADO", "CERRADO"].includes(estado);
+  const totalCobrar = toMoney(row.total_cobrar != null ? row.total_cobrar : row.total);
+  const totalPagado = toMoney(row.total_pagado);
 
   return {
     id: row.id,
@@ -29,6 +31,10 @@ function toPedido(row) {
     subtotal: toMoney(row.subtotal),
     impuesto: toMoney(row.impuesto),
     total: toMoney(row.total),
+    totalCobrar,
+    totalPagado,
+    saldoPendiente: toMoney(totalCobrar - totalPagado),
+    cuentasCount: Number(row.cuentas_count || 0),
     createdAt: row.fecha_apertura,
     fechaApertura: row.fecha_apertura,
     fechaCierre: row.fecha_cierre,
@@ -162,6 +168,7 @@ async function getSchemaCapabilities(connection, forceRefresh = false) {
 }
 
 async function listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta } = {}) {
+  const schema = await getSchemaCapabilities();
   const filters = [];
   const params = [];
 
@@ -202,6 +209,32 @@ async function listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDe
 
   const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
 
+  const cuentasJoin = schema.hasCuentasPedidoTable
+    ? `
+    LEFT JOIN (
+      SELECT
+        pedido_id,
+        COUNT(*) AS cuentas_count,
+        COALESCE(SUM(total), 0) AS total_cuentas
+      FROM cuentas_pedido
+      GROUP BY pedido_id
+    ) cp ON cp.pedido_id = p.id
+    `
+    : "";
+
+  const cuentasSelect = schema.hasCuentasPedidoTable
+    ? `
+      COALESCE(cp.cuentas_count, 0) AS cuentas_count,
+      CASE
+        WHEN COALESCE(cp.cuentas_count, 0) > 0 THEN COALESCE(cp.total_cuentas, 0)
+        ELSE p.total
+      END AS total_cobrar,
+    `
+    : `
+      0 AS cuentas_count,
+      p.total AS total_cobrar,
+    `;
+
   const rows = await query(
     `
     SELECT
@@ -219,12 +252,22 @@ async function listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDe
       p.subtotal,
       p.impuesto,
       p.total,
+      ${cuentasSelect}
+      COALESCE(pg.total_pagado, 0) AS total_pagado,
       p.fecha_apertura,
       p.fecha_cierre
     FROM pedidos p
     LEFT JOIN mesas m ON m.id = p.mesa_id
     LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN usuarios u ON u.id = p.usuario_id
+    ${cuentasJoin}
+    LEFT JOIN (
+      SELECT
+        pedido_id,
+        COALESCE(SUM(monto), 0) AS total_pagado
+      FROM pagos
+      GROUP BY pedido_id
+    ) pg ON pg.pedido_id = p.id
     ${whereClause}
     ORDER BY p.id DESC
     `,

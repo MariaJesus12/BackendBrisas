@@ -138,6 +138,28 @@ function parseDateTime(value) {
   return date;
 }
 
+function buildDateRangeFromDay(rawDate) {
+  const match = String(rawDate || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const start = new Date(year, month - 1, day, 0, 0, 0);
+  const end = new Date(year, month - 1, day, 23, 59, 59);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return null;
+  }
+
+  return {
+    fechaDesde: toMySqlDateTime(start),
+    fechaHasta: toMySqlDateTime(end),
+  };
+}
+
 function toMySqlDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
 
@@ -1102,8 +1124,19 @@ async function listPedidosHandler(req, res) {
   const clienteIdRaw = req.query.clienteId ?? req.query.cliente_id;
   const clienteId = clienteIdRaw == null || clienteIdRaw === "" ? undefined : Number(clienteIdRaw);
   const usuarioId = req.query.usuarioId ? Number(req.query.usuarioId) : undefined;
-  const fechaDesde = req.query.fechaDesde ? String(req.query.fechaDesde) : undefined;
-  const fechaHasta = req.query.fechaHasta ? String(req.query.fechaHasta) : undefined;
+  let fechaDesde = req.query.fechaDesde ?? req.query.fecha_desde;
+  let fechaHasta = req.query.fechaHasta ?? req.query.fecha_hasta;
+
+  if (req.query.fecha) {
+    const range = buildDateRangeFromDay(req.query.fecha);
+    if (!range) {
+      res.status(400).json({ message: "fecha invalida. Formato esperado: YYYY-MM-DD" });
+      return;
+    }
+
+    fechaDesde = range.fechaDesde;
+    fechaHasta = range.fechaHasta;
+  }
 
   if (estado && !PEDIDO_ESTADOS.has(estado)) {
     res.status(400).json({ message: "estado invalido" });
@@ -1130,8 +1163,58 @@ async function listPedidosHandler(req, res) {
     return;
   }
 
-  const pedidos = await listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta });
-  res.json({ pedidos });
+  if (fechaDesde && !parseDateTime(fechaDesde)) {
+    res.status(400).json({ message: "fechaDesde invalida" });
+    return;
+  }
+
+  if (fechaHasta && !parseDateTime(fechaHasta)) {
+    res.status(400).json({ message: "fechaHasta invalida" });
+    return;
+  }
+
+  const pedidos = await listPedidos({
+    estado,
+    tipo,
+    mesaId,
+    clienteId,
+    usuarioId,
+    fechaDesde,
+    fechaHasta,
+  });
+
+  const summary = pedidos.reduce(
+    (acc, pedido) => {
+      acc.totalPedidos += 1;
+      acc.totalCobrar = roundMoney(acc.totalCobrar + Number(pedido.totalCobrar || 0));
+      acc.totalPagado = roundMoney(acc.totalPagado + Number(pedido.totalPagado || 0));
+      acc.saldoPendiente = roundMoney(acc.saldoPendiente + Number(pedido.saldoPendiente || 0));
+      acc.totalCuentas += Number(pedido.cuentasCount || 0);
+      return acc;
+    },
+    {
+      totalPedidos: 0,
+      totalCobrar: 0,
+      totalPagado: 0,
+      saldoPendiente: 0,
+      totalCuentas: 0,
+    },
+  );
+
+  res.json({
+    filters: {
+      estado: estado || null,
+      tipo: tipo || null,
+      mesaId: mesaId || null,
+      clienteId: clienteId || null,
+      usuarioId: usuarioId || null,
+      fecha: req.query.fecha || null,
+      fechaDesde: fechaDesde || null,
+      fechaHasta: fechaHasta || null,
+    },
+    summary,
+    pedidos,
+  });
 }
 
 async function getPedidoByIdHandler(req, res) {
