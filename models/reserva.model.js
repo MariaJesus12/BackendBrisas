@@ -1,4 +1,5 @@
 const { query } = require("../config/database");
+const { getCurrentCostaRicaDateTimeString } = require("../utils/costa-rica-time");
 
 const RESERVA_ESTADOS = ["PENDIENTE", "CONFIRMADA", "ATENDIDA", "CANCELADA"];
 const RESERVA_ESTADOS_ACTIVOS = ["PENDIENTE", "CONFIRMADA"];
@@ -25,9 +26,10 @@ function toReserva(row) {
   };
 }
 
-async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta } = {}) {
+async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta, referenceDateTime } = {}) {
   const filters = [];
   const params = [];
+  const currentReferenceDateTime = referenceDateTime || getCurrentCostaRicaDateTimeString();
 
   if (estado) {
     filters.push("r.estado = ?");
@@ -80,7 +82,7 @@ async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, 
       DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AS bloqueo_inicio,
       CASE
         WHEN r.estado IN ('PENDIENTE', 'CONFIRMADA')
-          AND NOW() BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
+          AND ? BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
         THEN 1
         ELSE 0
       END AS bloqueo_activo
@@ -91,13 +93,14 @@ async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, 
     ${whereClause}
     ORDER BY r.fecha_hora ASC, r.id ASC
     `,
-    params,
+    [currentReferenceDateTime, ...params],
   );
 
   return rows.map(toReserva);
 }
 
 async function findReservaById(reservaId) {
+  const currentReferenceDateTime = getCurrentCostaRicaDateTimeString();
   const rows = await query(
     `
     SELECT
@@ -117,7 +120,7 @@ async function findReservaById(reservaId) {
       DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AS bloqueo_inicio,
       CASE
         WHEN r.estado IN ('PENDIENTE', 'CONFIRMADA')
-          AND NOW() BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
+          AND ? BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
         THEN 1
         ELSE 0
       END AS bloqueo_activo
@@ -128,7 +131,7 @@ async function findReservaById(reservaId) {
     WHERE r.id = ?
     LIMIT 1
     `,
-    [reservaId],
+    [currentReferenceDateTime, reservaId],
   );
 
   const row = rows[0];
@@ -145,7 +148,9 @@ async function createReserva({
   cantidadPersonas,
   observaciones,
   estado,
+  createdAt,
 }) {
+  const currentCreatedAt = createdAt || getCurrentCostaRicaDateTimeString();
   const result = await query(
     `
     INSERT INTO reservas (
@@ -160,9 +165,9 @@ async function createReserva({
       estado,
       created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
-    [mesaId, clienteId, usuarioId, nombreCliente, telefono, fechaHora, cantidadPersonas, observaciones, estado],
+    [mesaId, clienteId, usuarioId, nombreCliente, telefono, fechaHora, cantidadPersonas, observaciones, estado, currentCreatedAt],
   );
 
   return result.insertId;

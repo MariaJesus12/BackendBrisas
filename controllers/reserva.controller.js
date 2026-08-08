@@ -12,63 +12,14 @@ const {
   updateReservaEstado,
 } = require("../models/reserva.model");
 const { findUserById } = require("../models/user.model");
+const {
+  buildCostaRicaDateRangeFromDay,
+  parseDateTimeInCostaRica,
+  toCostaRicaMySqlDateTime,
+} = require("../utils/costa-rica-time");
 
 const ESTADOS_SET = new Set(RESERVA_ESTADOS);
 const ESTADOS_ACTIVOS_SET = new Set(RESERVA_ESTADOS_ACTIVOS);
-
-function parseDateTimeInput(value) {
-  if (value == null || value === "") {
-    return null;
-  }
-
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : value;
-  }
-
-  const raw = String(value).trim();
-
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) {
-    return direct;
-  }
-
-  const normalized = raw.replace(" ", "T");
-  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!match) {
-    return null;
-  }
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6] || 0);
-
-  const date = new Date(year, month - 1, day, hour, minute, second);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return date;
-}
-
-function toMySqlDateTime(inputDate) {
-  const date = inputDate instanceof Date ? inputDate : new Date(inputDate);
-
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  const second = String(date.getSeconds()).padStart(2, "0");
-
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
-}
 
 function normalizeUpper(value) {
   return String(value || "").trim().toUpperCase();
@@ -86,7 +37,7 @@ function parseReservaCreateInput(body, authUser) {
           : Number(body.cliente_id)
         : Number(body.clienteId),
     usuarioId: Number(body.usuarioId ?? body.usuario_id ?? authUser?.id),
-    fechaHora: parseDateTimeInput(fechaHoraRaw),
+    fechaHora: parseDateTimeInCostaRica(fechaHoraRaw),
     cantidadPersonas: Number(body.cantidadPersonas ?? body.cantidad_personas),
     observaciones:
       body.observaciones == null && body.observacion == null
@@ -116,7 +67,7 @@ function parseReservaUpdateInput(body, existingReserva) {
     mesaId: Number(mesaRaw),
     clienteId: clienteRaw == null || clienteRaw === "" ? null : Number(clienteRaw),
     usuarioId: Number(usuarioRaw),
-    fechaHora: parseDateTimeInput(incomingFechaHora),
+    fechaHora: parseDateTimeInCostaRica(incomingFechaHora),
     cantidadPersonas: Object.prototype.hasOwnProperty.call(body, "cantidadPersonas")
       ? Number(body.cantidadPersonas)
       : Object.prototype.hasOwnProperty.call(body, "cantidad_personas")
@@ -175,39 +126,6 @@ function validateReservaInput(input) {
   return { ok: true };
 }
 
-function parseDateOnlyInput(value) {
-  if (!value) {
-    return null;
-  }
-
-  const raw = String(value).trim();
-  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-  };
-}
-
-function buildDateRangeFromDay(rawDate) {
-  const parsed = parseDateOnlyInput(rawDate);
-  if (!parsed) {
-    return null;
-  }
-
-  const start = new Date(parsed.year, parsed.month - 1, parsed.day, 0, 0, 0);
-  const end = new Date(parsed.year, parsed.month - 1, parsed.day, 23, 59, 59);
-
-  return {
-    from: toMySqlDateTime(start),
-    to: toMySqlDateTime(end),
-  };
-}
-
 async function listReservasHandler(req, res) {
   const estado = req.query.estado ? normalizeUpper(req.query.estado) : undefined;
   const mesaId = req.query.mesaId ?? req.query.mesa_id;
@@ -218,7 +136,7 @@ async function listReservasHandler(req, res) {
   let fechaHasta = req.query.fechaHasta ?? req.query.fecha_hasta;
 
   if (req.query.fecha) {
-    const range = buildDateRangeFromDay(req.query.fecha);
+    const range = buildCostaRicaDateRangeFromDay(req.query.fecha);
     if (!range) {
       res.status(400).json({ message: "fecha invalida. Formato esperado: YYYY-MM-DD" });
       return;
@@ -236,12 +154,12 @@ async function listReservasHandler(req, res) {
     return;
   }
 
-  if (fechaDesde && !parseDateTimeInput(fechaDesde)) {
+  if (fechaDesde && !parseDateTimeInCostaRica(fechaDesde)) {
     res.status(400).json({ message: "fechaDesde invalida" });
     return;
   }
 
-  if (fechaHasta && !parseDateTimeInput(fechaHasta)) {
+  if (fechaHasta && !parseDateTimeInCostaRica(fechaHasta)) {
     res.status(400).json({ message: "fechaHasta invalida" });
     return;
   }
@@ -266,8 +184,8 @@ async function listReservasHandler(req, res) {
     mesaId: mesaId == null || mesaId === "" ? undefined : Number(mesaId),
     clienteId: clienteId == null || clienteId === "" ? undefined : Number(clienteId),
     usuarioId: usuarioId == null || usuarioId === "" ? undefined : Number(usuarioId),
-    fechaDesde: fechaDesde ? toMySqlDateTime(parseDateTimeInput(fechaDesde)) : undefined,
-    fechaHasta: fechaHasta ? toMySqlDateTime(parseDateTimeInput(fechaHasta)) : undefined,
+    fechaDesde: fechaDesde ? toCostaRicaMySqlDateTime(parseDateTimeInCostaRica(fechaDesde)) : undefined,
+    fechaHasta: fechaHasta ? toCostaRicaMySqlDateTime(parseDateTimeInCostaRica(fechaHasta)) : undefined,
   });
 
   res.json({ reservas });
@@ -319,7 +237,7 @@ async function createReservaHandler(req, res) {
   if (ESTADOS_ACTIVOS_SET.has(input.estado)) {
     const conflicts = await countReservaConflicts({
       mesaId: input.mesaId,
-      fechaHora: toMySqlDateTime(input.fechaHora),
+      fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
     });
 
     if (conflicts > 0) {
@@ -335,7 +253,7 @@ async function createReservaHandler(req, res) {
     ...input,
     nombreCliente: cliente.nombre,
     telefono: cliente.telefono,
-    fechaHora: toMySqlDateTime(input.fechaHora),
+    fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
   });
 
   const reserva = await findReservaById(reservaId);
@@ -388,7 +306,7 @@ async function updateReservaHandler(req, res) {
   if (ESTADOS_ACTIVOS_SET.has(input.estado)) {
     const conflicts = await countReservaConflicts({
       mesaId: input.mesaId,
-      fechaHora: toMySqlDateTime(input.fechaHora),
+      fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
       excludeReservaId: reservaId,
     });
 
@@ -405,7 +323,7 @@ async function updateReservaHandler(req, res) {
     ...input,
     nombreCliente: cliente.nombre,
     telefono: cliente.telefono,
-    fechaHora: toMySqlDateTime(input.fechaHora),
+    fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
   });
 
   const reserva = await findReservaById(reservaId);
@@ -441,7 +359,7 @@ async function updateReservaEstadoHandler(req, res) {
   if (ESTADOS_ACTIVOS_SET.has(estado)) {
     const conflicts = await countReservaConflicts({
       mesaId: existingReserva.mesaId,
-      fechaHora: toMySqlDateTime(existingReserva.fechaHora),
+      fechaHora: toCostaRicaMySqlDateTime(existingReserva.fechaHora),
       excludeReservaId: reservaId,
     });
 
@@ -464,7 +382,7 @@ async function updateReservaEstadoHandler(req, res) {
 
 async function listMesasReservationStatusHandler(req, res) {
   const rawAt = req.query.at;
-  const referenceDateTime = rawAt ? parseDateTimeInput(rawAt) : new Date();
+  const referenceDateTime = rawAt ? parseDateTimeInCostaRica(rawAt) : new Date();
 
   if (!referenceDateTime || Number.isNaN(referenceDateTime.getTime())) {
     res.status(400).json({
@@ -477,12 +395,12 @@ async function listMesasReservationStatusHandler(req, res) {
   const onlyActiveMesas = !(req.query.includeInactive === "1" || req.query.includeInactive === "true");
 
   const mesas = await listMesasReservationStatus({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     onlyActiveMesas,
   });
 
   res.json({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     mesas,
   });
 }

@@ -44,6 +44,10 @@ const { findProductById } = require("../models/product.model");
 const { findActiveReservaByMesaAt } = require("../models/reserva.model");
 const { findLatestActiveTipoCambio, findTipoCambioById } = require("../models/tipo-cambio.model");
 const { findUserById } = require("../models/user.model");
+const {
+  getCurrentCostaRicaDateTimeString,
+  toCostaRicaMySqlDateTime,
+} = require("../utils/costa-rica-time");
 
 const PEDIDO_TIPOS = new Set(["MESA", "LLEVAR"]);
 const PEDIDO_ESTADOS = new Set(["BORRADOR", "COCINA", "FACTURADO", "CERRADO", "CANCELADO"]);
@@ -1297,7 +1301,9 @@ async function createPedidoHandler(req, res) {
       return;
     }
 
-    const referenceDateTime = toMySqlDateTime(input.fechaApertura || new Date());
+    const referenceDateTime = input.fechaApertura
+      ? toCostaRicaMySqlDateTime(input.fechaApertura)
+      : getCurrentCostaRicaDateTimeString();
     const activeReserva = await findActiveReservaByMesaAt({
       mesaId: input.mesaId,
       referenceDateTime,
@@ -1468,7 +1474,9 @@ async function updatePedidoHandler(req, res) {
     const isAssigningMesa = existingPedido.tipo !== "MESA" || existingPedido.mesaId !== input.mesaId;
 
     if (isAssigningMesa) {
-      const referenceDateTime = toMySqlDateTime(input.fechaApertura || existingPedido.fechaApertura || new Date());
+      const referenceDateTime = input.fechaApertura || existingPedido.fechaApertura
+        ? toCostaRicaMySqlDateTime(input.fechaApertura || existingPedido.fechaApertura)
+        : getCurrentCostaRicaDateTimeString();
       const activeReserva = await findActiveReservaByMesaAt({
         mesaId: input.mesaId,
         referenceDateTime,

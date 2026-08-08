@@ -6,36 +6,10 @@ const {
   updateMesa,
 } = require("../models/mesa.model");
 const { listMesasReservationStatus } = require("../models/reserva.model");
-
-function parseDateTimeInput(value) {
-  if (value == null || value === "") {
-    return null;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return date;
-}
-
-function toMySqlDateTime(value) {
-  const date = value instanceof Date ? value : new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  const second = String(date.getSeconds()).padStart(2, "0");
-
-  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
-}
+const {
+  parseDateTimeInCostaRica,
+  toCostaRicaMySqlDateTime,
+} = require("../utils/costa-rica-time");
 
 function parseMesaInput(body) {
   return {
@@ -76,7 +50,7 @@ function validateMesaInput(mesa) {
 
 async function listMesasHandler(req, res) {
   const onlyActive = req.query.active === "1" || req.query.active === "true";
-  const referenceDateTime = req.query.at ? parseDateTimeInput(req.query.at) : new Date();
+  const referenceDateTime = req.query.at ? parseDateTimeInCostaRica(req.query.at) : new Date();
 
   if (!referenceDateTime) {
     res.status(400).json({
@@ -87,12 +61,12 @@ async function listMesasHandler(req, res) {
   }
 
   const mesas = await listMesasReservationStatus({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     onlyActiveMesas: onlyActive,
   });
 
   res.json({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     mesas,
   });
 }
@@ -110,7 +84,7 @@ async function getMesaByIdHandler(req, res) {
     return;
   }
 
-  const referenceDateTime = req.query.at ? parseDateTimeInput(req.query.at) : new Date();
+  const referenceDateTime = req.query.at ? parseDateTimeInCostaRica(req.query.at) : new Date();
   if (!referenceDateTime) {
     res.status(400).json({
       message: "Parametro at invalido",
@@ -120,7 +94,7 @@ async function getMesaByIdHandler(req, res) {
   }
 
   const mesasWithStatus = await listMesasReservationStatus({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     onlyActiveMesas: false,
   });
 
@@ -131,7 +105,7 @@ async function getMesaByIdHandler(req, res) {
   };
 
   res.json({
-    referenceDateTime: toMySqlDateTime(referenceDateTime),
+    referenceDateTime: toCostaRicaMySqlDateTime(referenceDateTime),
     mesa: mesaWithStatus,
   });
 }
