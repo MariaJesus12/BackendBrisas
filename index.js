@@ -73,10 +73,14 @@ app.get("/health/db", async (_req, res) => {
     res.json({ ok: true, db: "connected" });
   } catch (error) {
     const isProd = env.nodeEnv === "production";
+    const errorCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    const sqlState = error && typeof error === "object" && "sqlState" in error ? error.sqlState : undefined;
     res.status(500).json({
       ok: false,
       db: "disconnected",
       error: isProd ? "Database connection failed" : error instanceof Error ? error.message : "Unknown error",
+      code: errorCode,
+      sqlState,
     });
   }
 });

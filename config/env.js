@@ -1,6 +1,6 @@
 const dotenv = require("dotenv");
 
-dotenv.config({ override: true });
+dotenv.config();
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
