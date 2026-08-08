@@ -182,6 +182,22 @@ async function printText(printerName, content, copies) {
 }
 
 async function processJob(job) {
+  const jobType = String(job.tipo || "").trim().toUpperCase();
+
+  if (config.filterType && jobType !== config.filterType) {
+    const message = `Trabajo ${job.id} rechazado: tipo ${jobType || "N/D"} no coincide con filtro ${config.filterType}`;
+    console.error(`[PRINT] ${message}`);
+    await updateJobStatus(job.id, "ERROR", message);
+    return;
+  }
+
+  if (config.printerId && Number(job.impresoraId) !== Number(config.printerId)) {
+    const message = `Trabajo ${job.id} rechazado: impresora ${job.impresoraId || "N/D"} no coincide con PRINT_PRINTER_ID=${config.printerId}`;
+    console.error(`[PRINT] ${message}`);
+    await updateJobStatus(job.id, "ERROR", message);
+    return;
+  }
+
   console.log(`[PRINT] Procesando trabajo ${job.id} para ${job.impresoraSistema}`);
 
   try {

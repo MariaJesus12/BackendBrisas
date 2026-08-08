@@ -278,7 +278,7 @@ async function claimNextColaImpresion({ tipo, impresoraId } = {}) {
   try {
     await connection.beginTransaction();
 
-    const filters = ["c.estado = 'PENDIENTE'", "i.activa = 1"];
+    const filters = ["c.estado = 'PENDIENTE'", "i.activa = 1", "UPPER(ti.nombre) = UPPER(c.tipo)"];
     const params = [];
 
     if (tipo) {
@@ -296,6 +296,7 @@ async function claimNextColaImpresion({ tipo, impresoraId } = {}) {
       SELECT c.id
       FROM cola_impresion c
       INNER JOIN impresoras i ON i.id = c.impresora_id
+      INNER JOIN tipos_impresora ti ON ti.id = i.tipo_impresora_id
       WHERE ${filters.join(" AND ")}
       ORDER BY c.fecha_creacion ASC, c.id ASC
       LIMIT 1
