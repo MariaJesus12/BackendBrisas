@@ -78,8 +78,8 @@ async function listImpresoras({ onlyActive = false, tipo } = {}) {
   return rows.map(toPrinter);
 }
 
-async function findImpresoraById(impresoraId) {
-  const rows = await query(
+async function findImpresoraById(impresoraId, connection) {
+  const rows = await run(
     `
     SELECT
       i.id,
@@ -95,6 +95,7 @@ async function findImpresoraById(impresoraId) {
     LIMIT 1
     `,
     [impresoraId],
+    connection,
   );
 
   const row = rows[0];

@@ -2,6 +2,7 @@ const { findMesaById } = require("../models/mesa.model");
 const {
   countActiveQueueJobsByPedidoAndTipo,
   createColaImpresion,
+  findImpresoraById,
   findActiveImpresoraByTipo,
   findColaImpresionById,
 } = require("../models/impresion.model");
@@ -282,8 +283,26 @@ function buildInvoiceTicket(pedido) {
   return lines.join("\n");
 }
 
-async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copias = 1 }, connection) {
-  const printer = await findActiveImpresoraByTipo(tipo, connection);
+async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copias = 1, impresoraId }, connection) {
+  let printer;
+
+  if (impresoraId == null) {
+    printer = await findActiveImpresoraByTipo(tipo, connection);
+  } else {
+    printer = await findImpresoraById(impresoraId, connection);
+    if (!printer) {
+      throw appError(404, "La impresora seleccionada no existe");
+    }
+
+    if (!printer.activa) {
+      throw appError(409, "La impresora seleccionada no esta activa");
+    }
+
+    if (normalizeUpper(printer.tipo) !== normalizeUpper(tipo)) {
+      throw appError(409, `La impresora seleccionada no corresponde a ${tipo}`);
+    }
+  }
+
   if (!printer) {
     throw appError(409, `No hay una impresora activa configurada para ${tipo}`);
   }
@@ -2856,9 +2875,16 @@ async function sendPedidoToKitchenHandler(req, res) {
 
   const body = req.body || {};
   const copias = body.copias == null ? 1 : Number(body.copias);
+  const impresoraRaw = body.impresoraId ?? body.impresora_id;
+  const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  if (impresoraRaw != null && (!Number.isInteger(impresoraId) || impresoraId <= 0)) {
+    res.status(400).json({ message: "impresoraId invalido" });
     return;
   }
 
@@ -2900,6 +2926,7 @@ async function sendPedidoToKitchenHandler(req, res) {
         usuarioId: req.authUser.id,
         reimpresion: existingPedido.estado === "COCINA" ? 1 : 0,
         copias,
+        impresoraId,
       },
       connection,
     );
@@ -2953,9 +2980,16 @@ async function facturarPedidoHandler(req, res) {
 
   const body = req.body || {};
   const copias = body.copias == null ? 1 : Number(body.copias);
+  const impresoraRaw = body.impresoraId ?? body.impresora_id;
+  const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  if (impresoraRaw != null && (!Number.isInteger(impresoraId) || impresoraId <= 0)) {
+    res.status(400).json({ message: "impresoraId invalido" });
     return;
   }
 
@@ -3016,6 +3050,7 @@ async function facturarPedidoHandler(req, res) {
         usuarioId: req.authUser.id,
         reimpresion: existingPedido.estado === "FACTURADO" ? 1 : 0,
         copias,
+        impresoraId,
       },
       connection,
     );
@@ -3064,9 +3099,16 @@ async function reprintPedidoKitchenHandler(req, res) {
 
   const body = req.body || {};
   const copias = body.copias == null ? 1 : Number(body.copias);
+  const impresoraRaw = body.impresoraId ?? body.impresora_id;
+  const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  if (impresoraRaw != null && (!Number.isInteger(impresoraId) || impresoraId <= 0)) {
+    res.status(400).json({ message: "impresoraId invalido" });
     return;
   }
 
@@ -3082,6 +3124,7 @@ async function reprintPedidoKitchenHandler(req, res) {
         usuarioId: req.authUser.id,
         reimpresion: 1,
         copias,
+        impresoraId,
       },
       connection,
     );
@@ -3129,9 +3172,16 @@ async function reprintPedidoFacturaHandler(req, res) {
 
   const body = req.body || {};
   const copias = body.copias == null ? 1 : Number(body.copias);
+  const impresoraRaw = body.impresoraId ?? body.impresora_id;
+  const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
+    return;
+  }
+
+  if (impresoraRaw != null && (!Number.isInteger(impresoraId) || impresoraId <= 0)) {
+    res.status(400).json({ message: "impresoraId invalido" });
     return;
   }
 
@@ -3147,6 +3197,7 @@ async function reprintPedidoFacturaHandler(req, res) {
         usuarioId: req.authUser.id,
         reimpresion: 1,
         copias,
+        impresoraId,
       },
       connection,
     );
