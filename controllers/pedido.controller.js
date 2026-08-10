@@ -286,7 +286,7 @@ function buildInvoiceTicket(pedido) {
 }
 
 async function queuePedidoPrint(
-  { pedido, tipo, usuarioId, reimpresion = 0, copias = 1, impresoraId, esComandaAdicional = false },
+  { pedido, tipo, usuarioId, reimpresion = 0, copias = 1, impresoraId, esComandaAdicional = false, allowPendingJob = false },
   connection,
 ) {
   let printer;
@@ -313,7 +313,7 @@ async function queuePedidoPrint(
   }
 
   const activeJobs = await countActiveQueueJobsByPedidoAndTipo(pedido.id, tipo, connection);
-  if (activeJobs > 0) {
+  if (activeJobs > 0 && !allowPendingJob) {
     throw appError(409, `Ya existe una impresion ${tipo} pendiente o en proceso para este pedido`);
   }
 
@@ -2950,6 +2950,9 @@ async function sendPedidoToKitchenHandler(req, res) {
         copias,
         impresoraId,
         esComandaAdicional: detallesActuales.some((detail) => Number(detail.cantidadEnviadaCocina || 0) > 0),
+        // Las comandas adicionales se encolan en orden aunque la anterior aún
+        // esté pendiente o imprimiéndose; son trabajos distintos.
+        allowPendingJob: true,
       },
       connection,
     );
