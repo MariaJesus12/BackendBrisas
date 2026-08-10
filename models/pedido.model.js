@@ -58,6 +58,7 @@ function toDetalle(row) {
     productoCodigo: row.producto_codigo,
     productoNombre: row.producto_nombre,
     cantidad: row.cantidad,
+    cantidadEnviadaCocina: Number(row.cantidad_enviada_cocina || 0),
     precioUnitario: toMoney(row.precio_unitario),
     subtotal: toMoney(row.subtotal),
     observacion: row.observacion,
@@ -158,6 +159,7 @@ async function getSchemaCapabilities(connection, forceRefresh = false) {
 
   schemaCapabilitiesCache = {
     hasDetalleCuentaPedidoId: hasColumn("detalle_pedido", "cuenta_pedido_id"),
+    hasDetalleCantidadEnviadaCocina: hasColumn("detalle_pedido", "cantidad_enviada_cocina"),
     hasCuentasPedidoTable: hasTable("cuentas_pedido"),
     hasPagosMonedaColumns:
       hasColumn("pagos", "moneda_id") &&
@@ -284,8 +286,8 @@ async function listPedidos({ estado, tipo, mesaId, clienteId, usuarioId, fechaDe
   return rows.map(toPedido);
 }
 
-async function findPedidoById(pedidoId) {
-  const rows = await query(
+async function findPedidoById(pedidoId, connection) {
+  const rows = await run(
     `
     SELECT
       p.id,
@@ -312,6 +314,7 @@ async function findPedidoById(pedidoId) {
     LIMIT 1
     `,
     [pedidoId],
+    connection,
   );
 
   const row = rows[0];
@@ -483,6 +486,9 @@ async function deletePedidoCascade(pedidoId, connection) {
 async function listDetalleByPedidoId(pedidoId, connection) {
   const schema = await getSchemaCapabilities();
   const cuentaPedidoColumn = schema.hasDetalleCuentaPedidoId ? "d.cuenta_pedido_id" : "NULL AS cuenta_pedido_id";
+  const cantidadEnviadaCocinaColumn = schema.hasDetalleCantidadEnviadaCocina
+    ? "d.cantidad_enviada_cocina"
+    : "0 AS cantidad_enviada_cocina";
 
   const rows = await run(
     `
@@ -494,6 +500,7 @@ async function listDetalleByPedidoId(pedidoId, connection) {
       p.codigo AS producto_codigo,
       p.nombre AS producto_nombre,
       d.cantidad,
+      ${cantidadEnviadaCocinaColumn},
       d.precio_unitario,
       d.subtotal,
       d.observacion,
@@ -513,6 +520,9 @@ async function listDetalleByPedidoId(pedidoId, connection) {
 async function findDetalleByIdAndPedido(detalleId, pedidoId, connection) {
   const schema = await getSchemaCapabilities();
   const cuentaPedidoColumn = schema.hasDetalleCuentaPedidoId ? "d.cuenta_pedido_id" : "NULL AS cuenta_pedido_id";
+  const cantidadEnviadaCocinaColumn = schema.hasDetalleCantidadEnviadaCocina
+    ? "d.cantidad_enviada_cocina"
+    : "0 AS cantidad_enviada_cocina";
 
   const rows = await run(
     `
@@ -524,6 +534,7 @@ async function findDetalleByIdAndPedido(detalleId, pedidoId, connection) {
       p.codigo AS producto_codigo,
       p.nombre AS producto_nombre,
       d.cantidad,
+      ${cantidadEnviadaCocinaColumn},
       d.precio_unitario,
       d.subtotal,
       d.observacion,
@@ -542,7 +553,7 @@ async function findDetalleByIdAndPedido(detalleId, pedidoId, connection) {
 }
 
 async function createDetallePedido(
-  { pedidoId, cuentaPedidoId = null, productoId, cantidad, precioUnitario, subtotal, observacion },
+  { pedidoId, cuentaPedidoId = null, productoId, cantidad, cantidadEnviadaCocina = 0, precioUnitario, subtotal, observacion },
   connection,
 ) {
   const schema = await getSchemaCapabilities(connection);
@@ -559,16 +570,55 @@ async function createDetallePedido(
     return legacyResult.insertId;
   }
 
+  const cantidadEnviadaCocinaColumn = schema.hasDetalleCantidadEnviadaCocina ? ", cantidad_enviada_cocina" : "";
+  const cantidadEnviadaCocinaPlaceholder = schema.hasDetalleCantidadEnviadaCocina ? ", ?" : "";
   const result = await run(
     `
-    INSERT INTO detalle_pedido (pedido_id, cuenta_pedido_id, producto_id, cantidad, precio_unitario, subtotal, observacion, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+    INSERT INTO detalle_pedido (pedido_id, cuenta_pedido_id, producto_id, cantidad${cantidadEnviadaCocinaColumn}, precio_unitario, subtotal, observacion, created_at)
+    VALUES (?, ?, ?, ?${cantidadEnviadaCocinaPlaceholder}, ?, ?, ?, NOW())
     `,
-    [pedidoId, cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion],
+    schema.hasDetalleCantidadEnviadaCocina
+      ? [pedidoId, cuentaPedidoId, productoId, cantidad, cantidadEnviadaCocina, precioUnitario, subtotal, observacion]
+      : [pedidoId, cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion],
     connection,
   );
 
   return result.insertId;
+}
+
+async function lockPedidoForKitchenDispatch(pedidoId, connection) {
+  await run(
+    `
+    SELECT id
+    FROM pedidos
+    WHERE id = ?
+    FOR UPDATE
+    `,
+    [pedidoId],
+    connection,
+  );
+}
+
+async function markDetallesAsSentToKitchen(detalleIds, connection) {
+  if (!Array.isArray(detalleIds) || detalleIds.length === 0) return 0;
+
+  const schema = await getSchemaCapabilities(connection);
+  if (!schema.hasDetalleCantidadEnviadaCocina) {
+    throw new Error("La columna cantidad_enviada_cocina no existe en detalle_pedido");
+  }
+
+  const placeholders = detalleIds.map(() => "?").join(", ");
+  const result = await run(
+    `
+    UPDATE detalle_pedido
+    SET cantidad_enviada_cocina = cantidad
+    WHERE id IN (${placeholders})
+    `,
+    detalleIds,
+    connection,
+  );
+
+  return result.affectedRows;
 }
 
 async function updateDetallePedido(
@@ -596,6 +646,9 @@ async function updateDetallePedido(
     return legacyResult.affectedRows;
   }
 
+  const cantidadEnviadaCocinaSet = schema.hasDetalleCantidadEnviadaCocina
+    ? ",\n      cantidad_enviada_cocina = LEAST(cantidad_enviada_cocina, ?)"
+    : "";
   const result = await run(
     `
     UPDATE detalle_pedido
@@ -605,10 +658,12 @@ async function updateDetallePedido(
       cantidad = ?,
       precio_unitario = ?,
       subtotal = ?,
-      observacion = ?
+      observacion = ?${cantidadEnviadaCocinaSet}
     WHERE id = ?
     `,
-    [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
+    schema.hasDetalleCantidadEnviadaCocina
+      ? [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, cantidad, detalleId]
+      : [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
     connection,
   );
 
@@ -1261,4 +1316,6 @@ module.exports = {
   assignDetalleToCuenta,
   sumDetalleSubtotalByCuenta,
   listDetalleByCuentaPedidoId,
+  lockPedidoForKitchenDispatch,
+  markDetallesAsSentToKitchen,
 };

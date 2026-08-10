@@ -27,6 +27,8 @@ const {
   listMetodosPago,
   listPagosByPedidoId,
   listPedidos,
+  lockPedidoForKitchenDispatch,
+  markDetallesAsSentToKitchen,
   pool,
   sumDetalleSubtotalByCuenta,
   sumDetalleSubtotalByPedido,
@@ -230,10 +232,10 @@ function getPedidoDestinoLabel(pedido) {
   return "PARA LLEVAR";
 }
 
-function buildKitchenTicket(pedido) {
+function buildKitchenTicket(pedido, { esComandaAdicional = false } = {}) {
   const lines = [
     "**************",
-    "COMANDA COCINA",
+    esComandaAdicional ? "COMANDA ADICIONAL" : "COMANDA COCINA",
     getPedidoDestinoLabel(pedido),
     `Pedido: ${pedido.codigo}`,
     `Atiende: ${pedido.usuarioNombre || `Usuario ${pedido.usuarioId}`}`,
@@ -283,7 +285,10 @@ function buildInvoiceTicket(pedido) {
   return lines.join("\n");
 }
 
-async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copias = 1, impresoraId }, connection) {
+async function queuePedidoPrint(
+  { pedido, tipo, usuarioId, reimpresion = 0, copias = 1, impresoraId, esComandaAdicional = false },
+  connection,
+) {
   let printer;
 
   if (impresoraId == null) {
@@ -312,7 +317,7 @@ async function queuePedidoPrint({ pedido, tipo, usuarioId, reimpresion = 0, copi
     throw appError(409, `Ya existe una impresion ${tipo} pendiente o en proceso para este pedido`);
   }
 
-  const contenido = tipo === "COCINA" ? buildKitchenTicket(pedido) : buildInvoiceTicket(pedido);
+  const contenido = tipo === "COCINA" ? buildKitchenTicket(pedido, { esComandaAdicional }) : buildInvoiceTicket(pedido);
 
   const jobId = await createColaImpresion(
     {
@@ -1102,6 +1107,11 @@ async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cant
 
   const remainingQty = currentQty - moveQty;
   const unitPrice = Number(detail.precioUnitario);
+  const sentQty = Number(detail.cantidadEnviadaCocina || 0);
+  // Las unidades ya impresas se conservan entre ambos detalles al dividir una cuenta;
+  // asi un detalle movido no vuelve a aparecer como pendiente para cocina.
+  const remainingSentQty = Math.min(sentQty, remainingQty);
+  const movedSentQty = Math.max(0, sentQty - remainingSentQty);
   const movedSubtotal = roundMoney(unitPrice * moveQty);
   const remainingSubtotal = roundMoney(unitPrice * remainingQty);
 
@@ -1124,6 +1134,7 @@ async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cant
       cuentaPedidoId: cuentaId,
       productoId: detail.productoId,
       cantidad: moveQty,
+      cantidadEnviadaCocina: movedSentQty,
       precioUnitario: unitPrice,
       subtotal: movedSubtotal,
       observacion: detail.observacion,
@@ -2868,11 +2879,6 @@ async function sendPedidoToKitchenHandler(req, res) {
     return;
   }
 
-  if (!existingPedido.detalles.length) {
-    res.status(409).json({ message: "El pedido no tiene detalles para imprimir en cocina" });
-    return;
-  }
-
   const body = req.body || {};
   const copias = body.copias == null ? 1 : Number(body.copias);
   const impresoraRaw = body.impresoraId ?? body.impresora_id;
@@ -2893,7 +2899,22 @@ async function sendPedidoToKitchenHandler(req, res) {
   try {
     await connection.beginTransaction();
 
-    const pedidoState = await findPedidoById(pedidoId);
+    // Serializa los envios del mismo pedido para que dos solicitudes simultaneas
+    // no alcancen a imprimir los mismos productos pendientes.
+    await lockPedidoForKitchenDispatch(pedidoId, connection);
+    const pedidoState = await findPedidoById(pedidoId, connection);
+    const detallesActuales = await listDetalleByPedidoId(pedidoId, connection);
+    const detallesPendientes = detallesActuales
+      .map((detail) => {
+        const cantidadPendiente = Number(detail.cantidad) - Number(detail.cantidadEnviadaCocina || 0);
+        return cantidadPendiente > 0 ? { ...detail, cantidad: cantidadPendiente } : null;
+      })
+      .filter(Boolean);
+
+    if (!detallesPendientes.length) {
+      throw appError(409, "No hay productos nuevos pendientes de enviar a cocina");
+    }
+
     const nextState = pedidoState.estado === "BORRADOR" ? "COCINA" : pedidoState.estado;
 
     if (nextState !== pedidoState.estado) {
@@ -2919,15 +2940,22 @@ async function sendPedidoToKitchenHandler(req, res) {
     const jobId = await queuePedidoPrint(
       {
         pedido: {
-          ...existingPedido,
+          ...pedidoState,
           estado: nextState,
+          detalles: detallesPendientes,
         },
         tipo: "COCINA",
         usuarioId: req.authUser.id,
-        reimpresion: existingPedido.estado === "COCINA" ? 1 : 0,
+        reimpresion: 0,
         copias,
         impresoraId,
+        esComandaAdicional: detallesActuales.some((detail) => Number(detail.cantidadEnviadaCocina || 0) > 0),
       },
+      connection,
+    );
+
+    await markDetallesAsSentToKitchen(
+      detallesPendientes.map((detail) => detail.id),
       connection,
     );
 
@@ -2940,6 +2968,7 @@ async function sendPedidoToKitchenHandler(req, res) {
       message: "Pedido enviado a cocina exitosamente",
       pedido,
       printJob,
+      detallesEnviados: detallesPendientes,
     });
   } catch (error) {
     await connection.rollback();
