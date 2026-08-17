@@ -10,7 +10,8 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
   hour: "2-digit",
   minute: "2-digit",
   second: "2-digit",
-  hour12: false,
+  // h23 garantiza 00:00 para medianoche; algunos runtimes formatean con h24.
+  hourCycle: "h23",
 });
 
 function pad2(value) {
@@ -66,11 +67,27 @@ function parseDateTimeInCostaRica(value) {
     const minute = Number(localMatch[5] || 0);
     const second = Number(localMatch[6] || 0);
 
-    const utcDate = new Date(Date.UTC(year, month - 1, day, hour + COSTA_RICA_UTC_OFFSET_HOURS, minute, second));
-    const normalized = toCostaRicaMySqlDateTime(utcDate);
-    const expected = buildMySqlDateTime({ year, month, day, hour, minute, second });
+    const maxDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const isValidLocalDateTime =
+      Number.isInteger(year) &&
+      year >= 1000 &&
+      month >= 1 &&
+      month <= 12 &&
+      day >= 1 &&
+      day <= maxDay &&
+      hour >= 0 &&
+      hour <= 23 &&
+      minute >= 0 &&
+      minute <= 59 &&
+      second >= 0 &&
+      second <= 59;
 
-    return normalized === expected ? utcDate : null;
+    if (!isValidLocalDateTime) {
+      return null;
+    }
+
+    const utcDate = new Date(Date.UTC(year, month - 1, day, hour + COSTA_RICA_UTC_OFFSET_HOURS, minute, second));
+    return Number.isNaN(utcDate.getTime()) ? null : utcDate;
   }
 
   const direct = new Date(raw);
