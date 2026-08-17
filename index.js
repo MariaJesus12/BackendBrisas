@@ -5,6 +5,7 @@ const morgan = require("morgan");
 
 const { env } = require("./config/env");
 const { pool } = require("./config/database");
+const { requireAuth } = require("./middlewares/auth.middleware");
 const announcementRouter = require("./routes/announcement.routes");
 const authRouter = require("./auth");
 const categoryRouter = require("./routes/category.routes");
@@ -47,6 +48,11 @@ app.use((req, res, next) => {
 });
 
 app.use("/api/auth", authRouter);
+
+// Todo endpoint de la API, excepto los que pertenecen a /api/auth (login),
+// requiere un JWT valido. Asi no se deja una ruta nueva expuesta por omision.
+app.use("/api", requireAuth);
+
 app.use("/api/announcements", announcementRouter);
 app.use("/api/categories", categoryRouter);
 app.use("/api/clientes", clienteRouter);

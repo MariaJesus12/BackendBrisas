@@ -10,6 +10,7 @@ const {
   deletePedidoHandler,
   deletePedidoPaymentHandler,
   facturarPedidoHandler,
+  getCierreDiarioHandler,
   getPedidoByIdHandler,
   listPaymentMethodsHandler,
   listPedidoAccountsHandler,
@@ -33,6 +34,7 @@ const pedidoRouter = express.Router();
 pedidoRouter.use(requireAuth, requireRoles("ADMIN", "MESERO", "CAJERO"));
 
 pedidoRouter.get("/payment-methods", listPaymentMethodsHandler);
+pedidoRouter.get("/cierre-diario", getCierreDiarioHandler);
 
 pedidoRouter.get("/", listPedidosHandler);
 pedidoRouter.get("/:id", getPedidoByIdHandler);

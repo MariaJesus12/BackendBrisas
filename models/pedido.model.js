@@ -1067,6 +1067,67 @@ async function listMetodosPago() {
   return rows.map(toMetodoPago);
 }
 
+async function getCierreDiarioByPaymentMethod({ fechaDesde, fechaHasta }) {
+  const rows = await query(
+    `
+    SELECT
+      mp.id AS metodo_pago_id,
+      mp.nombre AS metodo_pago_nombre,
+      COALESCE(cierre.total, 0) AS total,
+      COALESCE(cierre.pagos_count, 0) AS pagos_count,
+      COALESCE(cierre.pedidos_count, 0) AS pedidos_count
+    FROM metodos_pago mp
+    LEFT JOIN (
+      SELECT
+        pg.metodo_pago_id,
+        SUM(pg.monto) AS total,
+        COUNT(*) AS pagos_count,
+        COUNT(DISTINCT pg.pedido_id) AS pedidos_count
+      FROM pagos pg
+      INNER JOIN pedidos p ON p.id = pg.pedido_id
+      WHERE pg.fecha >= ?
+        AND pg.fecha <= ?
+        AND p.estado IN ('FACTURADO', 'CERRADO')
+      GROUP BY pg.metodo_pago_id
+    ) cierre ON cierre.metodo_pago_id = mp.id
+    ORDER BY mp.nombre ASC
+    `,
+    [fechaDesde, fechaHasta],
+  );
+
+  return rows.map((row) => ({
+    metodoPagoId: row.metodo_pago_id,
+    metodoPagoNombre: row.metodo_pago_nombre,
+    total: toMoney(row.total),
+    pagosCount: Number(row.pagos_count || 0),
+    pedidosCount: Number(row.pedidos_count || 0),
+  }));
+}
+
+async function getCierreDiarioSummary({ fechaDesde, fechaHasta }) {
+  const rows = await query(
+    `
+    SELECT
+      COALESCE(SUM(pg.monto), 0) AS total,
+      COUNT(*) AS pagos_count,
+      COUNT(DISTINCT pg.pedido_id) AS pedidos_count
+    FROM pagos pg
+    INNER JOIN pedidos p ON p.id = pg.pedido_id
+    WHERE pg.fecha >= ?
+      AND pg.fecha <= ?
+      AND p.estado IN ('FACTURADO', 'CERRADO')
+    `,
+    [fechaDesde, fechaHasta],
+  );
+
+  const row = rows[0] || {};
+  return {
+    totalVendido: toMoney(row.total),
+    pagosCount: Number(row.pagos_count || 0),
+    pedidosCount: Number(row.pedidos_count || 0),
+  };
+}
+
 async function findMetodoPagoById(metodoPagoId) {
   const rows = await query(
     `
@@ -1307,6 +1368,8 @@ module.exports = {
   sumPagosByPedidoId,
   sumPagosByCuentaPedidoId,
   listMetodosPago,
+  getCierreDiarioByPaymentMethod,
+  getCierreDiarioSummary,
   findMetodoPagoById,
   listCuentasByPedidoId,
   findCuentaByIdAndPedido,

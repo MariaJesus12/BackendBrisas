@@ -21,6 +21,8 @@ const {
   findPagoByIdAndPedido,
   findPedidoById,
   getNextPedidoCodeForDate,
+  getCierreDiarioByPaymentMethod,
+  getCierreDiarioSummary,
   listCuentasByPedidoId,
   listDetalleByCuentaPedidoId,
   listDetalleByPedidoId,
@@ -48,6 +50,7 @@ const { findActiveReservaByMesaAt } = require("../models/reserva.model");
 const { findLatestActiveTipoCambio, findTipoCambioById } = require("../models/tipo-cambio.model");
 const { findUserById } = require("../models/user.model");
 const {
+  buildCostaRicaDateRangeFromDay,
   getCurrentCostaRicaDateTimeString,
   toCostaRicaMySqlDateTime,
 } = require("../utils/costa-rica-time");
@@ -2861,6 +2864,33 @@ async function listPaymentMethodsHandler(_req, res) {
   });
 }
 
+async function getCierreDiarioHandler(req, res) {
+  const todayInCostaRica = getCurrentCostaRicaDateTimeString().slice(0, 10);
+  const fecha = String(req.query.fecha || todayInCostaRica).trim();
+  const range = buildCostaRicaDateRangeFromDay(fecha);
+
+  if (!range) {
+    res.status(400).json({ message: "fecha invalida. Formato esperado: YYYY-MM-DD" });
+    return;
+  }
+
+  const [porMetodoPago, resumen] = await Promise.all([
+    getCierreDiarioByPaymentMethod({ fechaDesde: range.from, fechaHasta: range.to }),
+    getCierreDiarioSummary({ fechaDesde: range.from, fechaHasta: range.to }),
+  ]);
+
+  res.json({
+    fecha,
+    periodo: {
+      desde: range.from,
+      hasta: range.to,
+      zonaHoraria: "America/Costa_Rica",
+    },
+    resumen,
+    porMetodoPago,
+  });
+}
+
 async function sendPedidoToKitchenHandler(req, res) {
   const pedidoId = Number(req.params.id);
   if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
@@ -3357,6 +3387,7 @@ module.exports = {
   updatePedidoPaymentHandler,
   deletePedidoPaymentHandler,
   listPaymentMethodsHandler,
+  getCierreDiarioHandler,
   sendPedidoToKitchenHandler,
   facturarPedidoHandler,
   reprintPedidoHandler,
