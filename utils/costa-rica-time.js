@@ -47,6 +47,15 @@ function toCostaRicaMySqlDateTime(value) {
   return parts ? buildMySqlDateTime(parts) : null;
 }
 
+function toUtcMySqlDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
 function parseDateTimeInCostaRica(value) {
   if (value == null || value === "") {
     return null;
@@ -112,6 +121,10 @@ function buildCostaRicaDateRangeFromDay(rawDate) {
   return {
     from: toCostaRicaMySqlDateTime(start),
     to: toCostaRicaMySqlDateTime(end),
+    // pagos.fecha se registra con NOW() en una base configurada en UTC.
+    // Estos limites preservan el dia civil de Costa Rica al consultar MySQL.
+    fromUtc: toUtcMySqlDateTime(start),
+    toUtc: toUtcMySqlDateTime(end),
   };
 }
 

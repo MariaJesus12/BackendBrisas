@@ -2875,8 +2875,8 @@ async function getCierreDiarioHandler(req, res) {
   }
 
   const [porMetodoPago, resumen] = await Promise.all([
-    getCierreDiarioByPaymentMethod({ fechaDesde: range.from, fechaHasta: range.to }),
-    getCierreDiarioSummary({ fechaDesde: range.from, fechaHasta: range.to }),
+    getCierreDiarioByPaymentMethod({ fechaDesde: range.fromUtc, fechaHasta: range.toUtc }),
+    getCierreDiarioSummary({ fechaDesde: range.fromUtc, fechaHasta: range.toUtc }),
   ]);
 
   res.json({

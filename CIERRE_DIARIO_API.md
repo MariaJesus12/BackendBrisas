@@ -10,6 +10,8 @@ Requiere `Authorization: Bearer <token>` y pueden usarlo los roles `ADMIN`,
 El cierre suma los pagos creados durante la fecha solicitada, únicamente cuando
 pertenecen a pedidos con estado `FACTURADO` o `CERRADO`. Esto excluye pedidos
 cancelados, borradores, pedidos pendientes y evita contar el vuelto como venta.
+El día se interpreta siempre en la zona horaria de Costa Rica, aunque MySQL
+guarde internamente los pagos en UTC.
 
 `totalVendido` y cada `porMetodoPago[].total` están expresados en la moneda
 local del sistema (`pagos.monto`), por lo que los pagos en otra moneda ya usan
