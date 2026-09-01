@@ -1,9 +1,7 @@
-const { findMesaById } = require("../models/mesa.model");
+const { ensureReservaPlaceholderMesaId } = require("../models/mesa.model");
 const { findActiveClienteById } = require("../models/cliente.model");
 const {
   RESERVA_ESTADOS,
-  RESERVA_ESTADOS_ACTIVOS,
-  countReservaConflicts,
   createReserva,
   findReservaById,
   listMesasReservationStatus,
@@ -19,7 +17,6 @@ const {
 } = require("../utils/costa-rica-time");
 
 const ESTADOS_SET = new Set(RESERVA_ESTADOS);
-const ESTADOS_ACTIVOS_SET = new Set(RESERVA_ESTADOS_ACTIVOS);
 
 function normalizeUpper(value) {
   return String(value || "").trim().toUpperCase();
@@ -29,7 +26,6 @@ function parseReservaCreateInput(body, authUser) {
   const fechaHoraRaw = body.fechaHora ?? body.fecha_hora;
 
   return {
-    mesaId: Number(body.mesaId ?? body.mesa_id),
     clienteId:
       body.clienteId == null || body.clienteId === ""
         ? body.cliente_id == null || body.cliente_id === ""
@@ -37,6 +33,8 @@ function parseReservaCreateInput(body, authUser) {
           : Number(body.cliente_id)
         : Number(body.clienteId),
     usuarioId: Number(body.usuarioId ?? body.usuario_id ?? authUser?.id),
+    nombreCliente: String(body.nombreCliente ?? body.nombre_cliente ?? body.nombre ?? "").trim(),
+    telefono: String(body.telefono ?? "").trim(),
     fechaHora: parseDateTimeInCostaRica(fechaHoraRaw),
     cantidadPersonas: Number(body.cantidadPersonas ?? body.cantidad_personas),
     observaciones:
@@ -48,25 +46,37 @@ function parseReservaCreateInput(body, authUser) {
 }
 
 function parseReservaUpdateInput(body, existingReserva) {
-  const hasMesaId = Object.prototype.hasOwnProperty.call(body, "mesaId");
-  const hasMesaIdAlias = Object.prototype.hasOwnProperty.call(body, "mesa_id");
   const hasClienteId = Object.prototype.hasOwnProperty.call(body, "clienteId");
   const hasClienteIdAlias = Object.prototype.hasOwnProperty.call(body, "cliente_id");
   const hasUsuarioId = Object.prototype.hasOwnProperty.call(body, "usuarioId");
   const hasUsuarioIdAlias = Object.prototype.hasOwnProperty.call(body, "usuario_id");
   const hasFechaHora = Object.prototype.hasOwnProperty.call(body, "fechaHora");
   const hasFechaHoraAlias = Object.prototype.hasOwnProperty.call(body, "fecha_hora");
+  const hasNombreCliente = Object.prototype.hasOwnProperty.call(body, "nombreCliente");
+  const hasNombreClienteAlias1 = Object.prototype.hasOwnProperty.call(body, "nombre_cliente");
+  const hasNombreClienteAlias2 = Object.prototype.hasOwnProperty.call(body, "nombre");
+  const hasTelefono = Object.prototype.hasOwnProperty.call(body, "telefono");
 
-  const mesaRaw = hasMesaId ? body.mesaId : hasMesaIdAlias ? body.mesa_id : existingReserva.mesaId;
   const clienteRaw = hasClienteId ? body.clienteId : hasClienteIdAlias ? body.cliente_id : existingReserva.clienteId;
   const usuarioRaw = hasUsuarioId ? body.usuarioId : hasUsuarioIdAlias ? body.usuario_id : existingReserva.usuarioId;
 
   const incomingFechaHora = hasFechaHora ? body.fechaHora : hasFechaHoraAlias ? body.fecha_hora : existingReserva.fechaHora;
 
+  const incomingNombreCliente = hasNombreCliente
+    ? body.nombreCliente
+    : hasNombreClienteAlias1
+      ? body.nombre_cliente
+      : hasNombreClienteAlias2
+        ? body.nombre
+        : existingReserva.nombreCliente;
+
+  const incomingTelefono = hasTelefono ? body.telefono : existingReserva.telefono;
+
   return {
-    mesaId: Number(mesaRaw),
     clienteId: clienteRaw == null || clienteRaw === "" ? null : Number(clienteRaw),
     usuarioId: Number(usuarioRaw),
+    nombreCliente: String(incomingNombreCliente ?? "").trim(),
+    telefono: String(incomingTelefono ?? "").trim(),
     fechaHora: parseDateTimeInCostaRica(incomingFechaHora),
     cantidadPersonas: Object.prototype.hasOwnProperty.call(body, "cantidadPersonas")
       ? Number(body.cantidadPersonas)
@@ -89,12 +99,16 @@ function parseReservaUpdateInput(body, existingReserva) {
 function validateReservaInput(input) {
   const missingFields = [];
 
-  if (!Number.isInteger(input.mesaId) || input.mesaId <= 0) missingFields.push("mesaId");
-  if (!Number.isInteger(input.clienteId) || input.clienteId <= 0) missingFields.push("clienteId");
   if (!Number.isInteger(input.usuarioId) || input.usuarioId <= 0) missingFields.push("usuarioId");
+  if (!input.nombreCliente) missingFields.push("nombreCliente");
+  if (!input.telefono) missingFields.push("telefono");
   if (!(input.fechaHora instanceof Date) || Number.isNaN(input.fechaHora.getTime())) missingFields.push("fechaHora");
   if (!Number.isInteger(input.cantidadPersonas) || input.cantidadPersonas <= 0) missingFields.push("cantidadPersonas");
   if (!ESTADOS_SET.has(input.estado)) missingFields.push("estado");
+
+  if (input.clienteId != null && (!Number.isInteger(input.clienteId) || input.clienteId <= 0)) {
+    missingFields.push("clienteId");
+  }
 
   if (missingFields.length > 0) {
     return {
@@ -104,14 +118,31 @@ function validateReservaInput(input) {
         message: "Faltan campos requeridos o son invalidos",
         missingFields,
         acceptedAliases: {
-          mesaId: ["mesaId", "mesa_id"],
           clienteId: ["clienteId", "cliente_id"],
           usuarioId: ["usuarioId", "usuario_id"],
+          nombreCliente: ["nombreCliente", "nombre_cliente", "nombre"],
+          telefono: ["telefono"],
           fechaHora: ["fechaHora", "fecha_hora"],
           cantidadPersonas: ["cantidadPersonas", "cantidad_personas"],
           observaciones: ["observaciones", "observacion"],
         },
       },
+    };
+  }
+
+  if (input.nombreCliente.length > 150) {
+    return {
+      ok: false,
+      status: 400,
+      payload: { message: "El nombre del cliente es demasiado largo (maximo 150 caracteres)" },
+    };
+  }
+
+  if (input.telefono.length > 30) {
+    return {
+      ok: false,
+      status: 400,
+      payload: { message: "El telefono es demasiado largo (maximo 30 caracteres)" },
     };
   }
 
@@ -128,7 +159,6 @@ function validateReservaInput(input) {
 
 async function listReservasHandler(req, res) {
   const estado = req.query.estado ? normalizeUpper(req.query.estado) : undefined;
-  const mesaId = req.query.mesaId ?? req.query.mesa_id;
   const clienteId = req.query.clienteId ?? req.query.cliente_id;
   const usuarioId = req.query.usuarioId ?? req.query.usuario_id;
 
@@ -164,11 +194,6 @@ async function listReservasHandler(req, res) {
     return;
   }
 
-  if (mesaId != null && mesaId !== "" && (!Number.isInteger(Number(mesaId)) || Number(mesaId) <= 0)) {
-    res.status(400).json({ message: "mesaId invalido" });
-    return;
-  }
-
   if (clienteId != null && clienteId !== "" && (!Number.isInteger(Number(clienteId)) || Number(clienteId) <= 0)) {
     res.status(400).json({ message: "clienteId invalido" });
     return;
@@ -181,7 +206,6 @@ async function listReservasHandler(req, res) {
 
   const reservas = await listReservas({
     estado,
-    mesaId: mesaId == null || mesaId === "" ? undefined : Number(mesaId),
     clienteId: clienteId == null || clienteId === "" ? undefined : Number(clienteId),
     usuarioId: usuarioId == null || usuarioId === "" ? undefined : Number(usuarioId),
     fechaDesde: fechaDesde ? toCostaRicaMySqlDateTime(parseDateTimeInCostaRica(fechaDesde)) : undefined,
@@ -216,43 +240,25 @@ async function createReservaHandler(req, res) {
     return;
   }
 
-  const mesa = await findMesaById(input.mesaId);
-  if (!mesa || !mesa.activa) {
-    res.status(409).json({ message: "La mesa no existe o no esta activa" });
-    return;
-  }
-
   const usuario = await findUserById(input.usuarioId);
   if (!usuario || !usuario.activo) {
     res.status(409).json({ message: "El usuario no existe o no esta activo" });
     return;
   }
 
-  const cliente = await findActiveClienteById(input.clienteId);
-  if (!cliente) {
-    res.status(409).json({ message: "El cliente no existe o no esta activo" });
-    return;
-  }
-
-  if (ESTADOS_ACTIVOS_SET.has(input.estado)) {
-    const conflicts = await countReservaConflicts({
-      mesaId: input.mesaId,
-      fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
-    });
-
-    if (conflicts > 0) {
-      res.status(409).json({
-        message: "La mesa ya tiene una reserva que se cruza en la ventana de bloqueo",
-        businessRule: "Cada reserva bloquea la mesa 2 horas antes de la hora reservada",
-      });
+  if (input.clienteId != null) {
+    const cliente = await findActiveClienteById(input.clienteId);
+    if (!cliente) {
+      res.status(409).json({ message: "El cliente no existe o no esta activo" });
       return;
     }
   }
 
+  const mesaId = await ensureReservaPlaceholderMesaId();
+
   const reservaId = await createReserva({
     ...input,
-    nombreCliente: cliente.nombre,
-    telefono: cliente.telefono,
+    mesaId,
     fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
   });
 
@@ -285,44 +291,22 @@ async function updateReservaHandler(req, res) {
     return;
   }
 
-  const mesa = await findMesaById(input.mesaId);
-  if (!mesa || !mesa.activa) {
-    res.status(409).json({ message: "La mesa no existe o no esta activa" });
-    return;
-  }
-
   const usuario = await findUserById(input.usuarioId);
   if (!usuario || !usuario.activo) {
     res.status(409).json({ message: "El usuario no existe o no esta activo" });
     return;
   }
 
-  const cliente = await findActiveClienteById(input.clienteId);
-  if (!cliente) {
-    res.status(409).json({ message: "El cliente no existe o no esta activo" });
-    return;
-  }
-
-  if (ESTADOS_ACTIVOS_SET.has(input.estado)) {
-    const conflicts = await countReservaConflicts({
-      mesaId: input.mesaId,
-      fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
-      excludeReservaId: reservaId,
-    });
-
-    if (conflicts > 0) {
-      res.status(409).json({
-        message: "La mesa ya tiene una reserva que se cruza en la ventana de bloqueo",
-        businessRule: "Cada reserva bloquea la mesa 2 horas antes de la hora reservada",
-      });
+  if (input.clienteId != null) {
+    const cliente = await findActiveClienteById(input.clienteId);
+    if (!cliente) {
+      res.status(409).json({ message: "El cliente no existe o no esta activo" });
       return;
     }
   }
 
   await updateReserva(reservaId, {
     ...input,
-    nombreCliente: cliente.nombre,
-    telefono: cliente.telefono,
     fechaHora: toCostaRicaMySqlDateTime(input.fechaHora),
   });
 
@@ -354,21 +338,6 @@ async function updateReservaEstadoHandler(req, res) {
   if (!existingReserva) {
     res.status(404).json({ message: "Reserva no encontrada" });
     return;
-  }
-
-  if (ESTADOS_ACTIVOS_SET.has(estado)) {
-    const conflicts = await countReservaConflicts({
-      mesaId: existingReserva.mesaId,
-      fechaHora: toCostaRicaMySqlDateTime(existingReserva.fechaHora),
-      excludeReservaId: reservaId,
-    });
-
-    if (conflicts > 0) {
-      res.status(409).json({
-        message: "No se puede activar la reserva porque se cruza con otra reserva activa",
-      });
-      return;
-    }
   }
 
   await updateReservaEstado(reservaId, estado);

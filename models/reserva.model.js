@@ -4,11 +4,11 @@ const { getCurrentCostaRicaDateTimeString } = require("../utils/costa-rica-time"
 const RESERVA_ESTADOS = ["PENDIENTE", "CONFIRMADA", "ATENDIDA", "CANCELADA"];
 const RESERVA_ESTADOS_ACTIVOS = ["PENDIENTE", "CONFIRMADA"];
 
+// mesa_id ya no representa una mesa real (ver mesa.model.js ensureReservaPlaceholderMesaId),
+// por lo que no se expone en la respuesta de la API.
 function toReserva(row) {
   return {
     id: row.id,
-    mesaId: row.mesa_id,
-    mesaNumero: row.mesa_numero,
     clienteId: row.cliente_id,
     clienteNombre: row.nombre_cliente,
     clienteTelefono: row.telefono,
@@ -21,15 +21,12 @@ function toReserva(row) {
     observaciones: row.observaciones,
     estado: row.estado,
     createdAt: row.created_at,
-    bloqueoInicio: row.bloqueo_inicio || null,
-    bloqueoActivo: row.bloqueo_activo === 1,
   };
 }
 
-async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta, referenceDateTime } = {}) {
+async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta } = {}) {
   const filters = [];
   const params = [];
-  const currentReferenceDateTime = referenceDateTime || getCurrentCostaRicaDateTimeString();
 
   if (estado) {
     filters.push("r.estado = ?");
@@ -67,8 +64,6 @@ async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, 
     `
     SELECT
       r.id,
-      r.mesa_id,
-      m.numero AS mesa_numero,
       r.cliente_id,
       r.usuario_id,
       u.nombre AS usuario_nombre,
@@ -78,35 +73,24 @@ async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, 
       r.cantidad_personas,
       r.observaciones,
       r.estado,
-      r.created_at,
-      DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AS bloqueo_inicio,
-      CASE
-        WHEN r.estado IN ('PENDIENTE', 'CONFIRMADA')
-          AND ? BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
-        THEN 1
-        ELSE 0
-      END AS bloqueo_activo
+      r.created_at
     FROM reservas r
-    INNER JOIN mesas m ON m.id = r.mesa_id
     LEFT JOIN clientes c ON c.id = r.cliente_id
     INNER JOIN usuarios u ON u.id = r.usuario_id
     ${whereClause}
     ORDER BY r.fecha_hora ASC, r.id ASC
     `,
-    [currentReferenceDateTime, ...params],
+    params,
   );
 
   return rows.map(toReserva);
 }
 
 async function findReservaById(reservaId) {
-  const currentReferenceDateTime = getCurrentCostaRicaDateTimeString();
   const rows = await query(
     `
     SELECT
       r.id,
-      r.mesa_id,
-      m.numero AS mesa_numero,
       r.cliente_id,
       r.usuario_id,
       u.nombre AS usuario_nombre,
@@ -116,22 +100,14 @@ async function findReservaById(reservaId) {
       r.cantidad_personas,
       r.observaciones,
       r.estado,
-      r.created_at,
-      DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AS bloqueo_inicio,
-      CASE
-        WHEN r.estado IN ('PENDIENTE', 'CONFIRMADA')
-          AND ? BETWEEN DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) AND r.fecha_hora
-        THEN 1
-        ELSE 0
-      END AS bloqueo_activo
+      r.created_at
     FROM reservas r
-    INNER JOIN mesas m ON m.id = r.mesa_id
     LEFT JOIN clientes c ON c.id = r.cliente_id
     INNER JOIN usuarios u ON u.id = r.usuario_id
     WHERE r.id = ?
     LIMIT 1
     `,
-    [currentReferenceDateTime, reservaId],
+    [reservaId],
   );
 
   const row = rows[0];
@@ -211,31 +187,6 @@ async function updateReservaEstado(reservaId, estado) {
   return result.affectedRows;
 }
 
-async function countReservaConflicts({ mesaId, fechaHora, excludeReservaId = null }) {
-  const params = [mesaId, fechaHora, fechaHora];
-  let excludeClause = "";
-
-  if (excludeReservaId) {
-    excludeClause = "AND r.id <> ?";
-    params.push(excludeReservaId);
-  }
-
-  const rows = await query(
-    `
-    SELECT COUNT(*) AS total
-    FROM reservas r
-    WHERE r.mesa_id = ?
-      AND r.estado IN ('PENDIENTE', 'CONFIRMADA')
-      AND DATE_SUB(r.fecha_hora, INTERVAL 2 HOUR) <= ?
-      AND r.fecha_hora >= DATE_SUB(?, INTERVAL 2 HOUR)
-      ${excludeClause}
-    `,
-    params,
-  );
-
-  return Number(rows[0]?.total || 0);
-}
-
 async function findActiveReservaByMesaAt({ mesaId, referenceDateTime }) {
   const rows = await query(
     `
@@ -273,14 +224,15 @@ async function findActiveReservaByMesaAt({ mesaId, referenceDateTime }) {
 }
 
 async function listMesasReservationStatus({ referenceDateTime, onlyActiveMesas = true } = {}) {
-  const filters = [];
+  // Las reservas ya no se vinculan con mesas reales; se excluye la mesa interna placeholder.
+  const filters = ["COALESCE(m.observacion, '') <> '__RESERVA_PLACEHOLDER__'"];
   const params = [referenceDateTime];
 
   if (onlyActiveMesas) {
     filters.push("m.activa = 1");
   }
 
-  const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+  const whereClause = `WHERE ${filters.join(" AND ")}`;
 
   const rows = await query(
     `
@@ -349,7 +301,6 @@ module.exports = {
   createReserva,
   updateReserva,
   updateReservaEstado,
-  countReservaConflicts,
   findActiveReservaByMesaAt,
   listMesasReservationStatus,
 };
