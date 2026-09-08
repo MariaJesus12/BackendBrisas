@@ -2598,24 +2598,6 @@ async function createPedidoPaymentHandler(req, res) {
       }
     }
 
-    const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId, connection));
-    const nuevoTotalPagado = roundMoney(totalPagadoActual + roundMoney(paymentPayload.monto));
-    const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
-
-    const pedidoTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
-
-    if (nuevoTotalPagado > totalPedidoCobrar + pedidoTolerance) {
-      res.status(409).json({
-        message: "El pago excede el total del pedido",
-        totalPedido: totalPedidoCobrar,
-        totalPagadoActual,
-        montoIntentado: roundMoney(paymentPayload.monto),
-        saldoPendienteAntes: roundMoney(totalPedidoCobrar - totalPagadoActual),
-      });
-      await connection.rollback();
-      return;
-    }
-
     const pagoId = await createPago(
       {
         pedidoId,
@@ -2798,25 +2780,6 @@ async function updatePedidoPaymentHandler(req, res) {
         await connection.rollback();
         return;
       }
-    }
-
-    const totalPagadoActual = roundMoney(await sumPagosByPedidoId(pedidoId, connection));
-    const totalSinEstePago = roundMoney(totalPagadoActual - Number(existingPago.monto));
-    const nuevoTotalPagado = roundMoney(totalSinEstePago + roundMoney(paymentPayload.monto));
-    const totalPedidoCobrar = await resolvePedidoPayableTotal(pedidoId, pedido.total);
-
-    const pedidoTolerance = paymentPayload.moneda.codigo === "USD" ? PAYMENT_OVERAGE_TOLERANCE : PAYMENT_OVERAGE_TOLERANCE;
-
-    if (nuevoTotalPagado > totalPedidoCobrar + pedidoTolerance) {
-      res.status(409).json({
-        message: "El pago excede el total del pedido",
-        totalPedido: totalPedidoCobrar,
-        totalPagadoActual,
-        montoIntentado: roundMoney(paymentPayload.monto),
-        saldoPendienteAntes: roundMoney(totalPedidoCobrar - totalSinEstePago),
-      });
-      await connection.rollback();
-      return;
     }
 
     await updatePago(
