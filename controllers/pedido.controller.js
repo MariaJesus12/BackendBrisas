@@ -1072,6 +1072,26 @@ async function resolveSplitItemsToDetails({ pedidoId, targetCuentaId, items, con
   return movements;
 }
 
+function normalizeObservacion(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+// Busca una linea del mismo producto (mismo precio y observacion) ya existente en la cuenta destino,
+// para fusionar cantidades en vez de crear una linea duplicada.
+async function findMergeableDetailInCuenta({ pedidoId, cuentaId, excludeDetailId, productoId, precioUnitario, observacion, connection }) {
+  const allDetails = await listDetalleByPedidoId(pedidoId, connection);
+  return (
+    allDetails.find(
+      (item) =>
+        item.id !== excludeDetailId &&
+        item.productoId === productoId &&
+        item.cuentaPedidoId === cuentaId &&
+        Number(item.precioUnitario) === Number(precioUnitario) &&
+        normalizeObservacion(item.observacion) === normalizeObservacion(observacion),
+    ) || null
+  );
+}
+
 async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cantidad, connection }) {
   const detail = await findDetalleByIdAndPedido(detailId, pedidoId, connection);
   if (!detail) {
@@ -1090,34 +1110,66 @@ async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cant
   }
 
   const fromCuentaId = detail.cuentaPedidoId;
-
-  if (moveQty === currentQty) {
-    await updateDetallePedido(
-      detailId,
-      {
-        cuentaPedidoId: cuentaId,
-        productoId: detail.productoId,
-        cantidad: currentQty,
-        precioUnitario: detail.precioUnitario,
-        subtotal: roundMoney(Number(detail.precioUnitario) * currentQty),
-        observacion: detail.observacion,
-      },
-      connection,
-    );
-
-    return { fromCuentaId, toCuentaId: cuentaId, movedQty: moveQty };
-  }
-
-  const remainingQty = currentQty - moveQty;
   const unitPrice = Number(detail.precioUnitario);
   const sentQty = Number(detail.cantidadEnviadaCocina || 0);
-  // Las unidades ya impresas se conservan entre ambos detalles al dividir una cuenta;
+  const remainingQty = currentQty - moveQty;
+  // Las unidades ya impresas se conservan entre los detalles al dividir/mover una cuenta;
   // asi un detalle movido no vuelve a aparecer como pendiente para cocina.
   const remainingSentQty = Math.min(sentQty, remainingQty);
   const movedSentQty = Math.max(0, sentQty - remainingSentQty);
   const movedSubtotal = roundMoney(unitPrice * moveQty);
+
+  const existingTarget = await findMergeableDetailInCuenta({
+    pedidoId,
+    cuentaId,
+    excludeDetailId: detailId,
+    productoId: detail.productoId,
+    precioUnitario: unitPrice,
+    observacion: detail.observacion,
+    connection,
+  });
+
+  if (remainingQty === 0) {
+    // Se mueve todo el detalle a la cuenta destino
+    if (existingTarget) {
+      const mergedQty = Number(existingTarget.cantidad) + moveQty;
+      const mergedSentQty = Number(existingTarget.cantidadEnviadaCocina || 0) + movedSentQty;
+
+      await updateDetallePedido(
+        existingTarget.id,
+        {
+          cuentaPedidoId: cuentaId,
+          productoId: existingTarget.productoId,
+          cantidad: mergedQty,
+          precioUnitario: unitPrice,
+          subtotal: roundMoney(unitPrice * mergedQty),
+          observacion: existingTarget.observacion,
+          cantidadEnviadaCocina: mergedSentQty,
+        },
+        connection,
+      );
+      await deleteDetallePedido(detailId, connection);
+    } else {
+      await updateDetallePedido(
+        detailId,
+        {
+          cuentaPedidoId: cuentaId,
+          productoId: detail.productoId,
+          cantidad: currentQty,
+          precioUnitario: unitPrice,
+          subtotal: roundMoney(unitPrice * currentQty),
+          observacion: detail.observacion,
+        },
+        connection,
+      );
+    }
+
+    return { fromCuentaId, toCuentaId: cuentaId, movedQty: moveQty };
+  }
+
   const remainingSubtotal = roundMoney(unitPrice * remainingQty);
 
+  // El detalle original conserva el remanente que no se movio
   await updateDetallePedido(
     detailId,
     {
@@ -1131,19 +1183,38 @@ async function assignDetailQuantityToCuenta({ pedidoId, cuentaId, detailId, cant
     connection,
   );
 
-  await createDetallePedido(
-    {
-      pedidoId,
-      cuentaPedidoId: cuentaId,
-      productoId: detail.productoId,
-      cantidad: moveQty,
-      cantidadEnviadaCocina: movedSentQty,
-      precioUnitario: unitPrice,
-      subtotal: movedSubtotal,
-      observacion: detail.observacion,
-    },
-    connection,
-  );
+  if (existingTarget) {
+    const mergedQty = Number(existingTarget.cantidad) + moveQty;
+    const mergedSentQty = Number(existingTarget.cantidadEnviadaCocina || 0) + movedSentQty;
+
+    await updateDetallePedido(
+      existingTarget.id,
+      {
+        cuentaPedidoId: cuentaId,
+        productoId: existingTarget.productoId,
+        cantidad: mergedQty,
+        precioUnitario: unitPrice,
+        subtotal: roundMoney(unitPrice * mergedQty),
+        observacion: existingTarget.observacion,
+        cantidadEnviadaCocina: mergedSentQty,
+      },
+      connection,
+    );
+  } else {
+    await createDetallePedido(
+      {
+        pedidoId,
+        cuentaPedidoId: cuentaId,
+        productoId: detail.productoId,
+        cantidad: moveQty,
+        cantidadEnviadaCocina: movedSentQty,
+        precioUnitario: unitPrice,
+        subtotal: movedSubtotal,
+        observacion: detail.observacion,
+      },
+      connection,
+    );
+  }
 
   return { fromCuentaId, toCuentaId: cuentaId, movedQty: moveQty };
 }

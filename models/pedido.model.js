@@ -623,7 +623,7 @@ async function markDetallesAsSentToKitchen(detalleIds, connection) {
 
 async function updateDetallePedido(
   detalleId,
-  { cuentaPedidoId = null, productoId, cantidad, precioUnitario, subtotal, observacion },
+  { cuentaPedidoId = null, productoId, cantidad, precioUnitario, subtotal, observacion, cantidadEnviadaCocina },
   connection,
 ) {
   const schema = await getSchemaCapabilities(connection);
@@ -646,9 +646,19 @@ async function updateDetallePedido(
     return legacyResult.affectedRows;
   }
 
-  const cantidadEnviadaCocinaSet = schema.hasDetalleCantidadEnviadaCocina
-    ? ",\n      cantidad_enviada_cocina = LEAST(cantidad_enviada_cocina, ?)"
-    : "";
+  let cantidadEnviadaCocinaSet = "";
+  let cantidadEnviadaCocinaParams = [];
+  if (schema.hasDetalleCantidadEnviadaCocina) {
+    if (cantidadEnviadaCocina != null) {
+      // Valor explicito: usado al fusionar dos detalles del mismo producto en una cuenta
+      cantidadEnviadaCocinaSet = ",\n      cantidad_enviada_cocina = ?";
+      cantidadEnviadaCocinaParams = [cantidadEnviadaCocina];
+    } else {
+      cantidadEnviadaCocinaSet = ",\n      cantidad_enviada_cocina = LEAST(cantidad_enviada_cocina, ?)";
+      cantidadEnviadaCocinaParams = [cantidad];
+    }
+  }
+
   const result = await run(
     `
     UPDATE detalle_pedido
@@ -661,9 +671,7 @@ async function updateDetallePedido(
       observacion = ?${cantidadEnviadaCocinaSet}
     WHERE id = ?
     `,
-    schema.hasDetalleCantidadEnviadaCocina
-      ? [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, cantidad, detalleId]
-      : [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
+    [cuentaPedidoId, productoId, cantidad, precioUnitario, subtotal, observacion, ...cantidadEnviadaCocinaParams, detalleId],
     connection,
   );
 
