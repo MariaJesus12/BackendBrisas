@@ -49,9 +49,27 @@ app.use((req, res, next) => {
 
 app.use("/api/auth", authRouter);
 
-// Todo endpoint de la API, excepto los que pertenecen a /api/auth (login),
-// requiere un JWT valido. Asi no se deja una ruta nueva expuesta por omision.
-app.use("/api", requireAuth);
+function requireApiAuth(req, res, next) {
+  const isPublicRead =
+    req.method === "GET" &&
+    (req.path === "/announcements" ||
+      req.path === "/categories" ||
+      /^\/categories\/[^/]+\/products$/.test(req.path) ||
+      req.path === "/configuracion-restaurante" ||
+      req.path === "/dish-of-month" ||
+      req.path === "/products");
+
+  if (isPublicRead) {
+    next();
+    return;
+  }
+
+  requireAuth(req, res, next);
+}
+
+// Todo endpoint de la API, salvo login y las lecturas de la vista publica,
+// requiere un JWT valido. Las nuevas rutas permanecen protegidas por omision.
+app.use("/api", requireApiAuth);
 
 app.use("/api/announcements", announcementRouter);
 app.use("/api/categories", categoryRouter);
