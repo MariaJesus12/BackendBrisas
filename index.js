@@ -56,6 +56,7 @@ function requireApiAuth(req, res, next) {
       req.path === "/categories" ||
       /^\/categories\/[^/]+\/products$/.test(req.path) ||
       req.path === "/configuracion-restaurante" ||
+      req.path === "/configuracion-restaurante/all" ||
       req.path === "/dish-of-month" ||
       req.path === "/products");
 
