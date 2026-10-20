@@ -4,6 +4,7 @@ const {
   createReservaHandler,
   getReservaByIdHandler,
   listMesasReservationStatusHandler,
+  listPendingReservasHandler,
   listReservasHandler,
   updateReservaEstadoHandler,
   updateReservaHandler,
@@ -15,6 +16,7 @@ const reservaRouter = express.Router();
 reservaRouter.use(requireAuth, requireRoles("ADMIN", "MESERO", "CAJERO"));
 
 reservaRouter.get("/mesas/estado", listMesasReservationStatusHandler);
+reservaRouter.get("/pendientes", listPendingReservasHandler);
 reservaRouter.get("/", listReservasHandler);
 reservaRouter.get("/:id", getReservaByIdHandler);
 reservaRouter.post("/", createReservaHandler);

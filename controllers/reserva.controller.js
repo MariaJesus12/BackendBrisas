@@ -12,6 +12,7 @@ const {
 const { findUserById } = require("../models/user.model");
 const {
   buildCostaRicaDateRangeFromDay,
+  getCurrentCostaRicaDateTimeString,
   parseDateTimeInCostaRica,
   toCostaRicaMySqlDateTime,
 } = require("../utils/costa-rica-time");
@@ -215,6 +216,24 @@ async function listReservasHandler(req, res) {
   res.json({ reservas });
 }
 
+async function listPendingReservasHandler(req, res) {
+  const desdeAhora = String(req.query.desdeAhora ?? "").toLowerCase() === "true";
+  const orden = normalizeUpper(req.query.orden || "ASC");
+
+  if (!["ASC", "DESC"].includes(orden)) {
+    res.status(400).json({ message: "orden invalido. Valores aceptados: ASC, DESC" });
+    return;
+  }
+
+  const reservas = await listReservas({
+    estado: "PENDIENTE",
+    fechaDesde: desdeAhora ? getCurrentCostaRicaDateTimeString() : undefined,
+    orden,
+  });
+
+  res.json({ reservas });
+}
+
 async function getReservaByIdHandler(req, res) {
   const reservaId = Number(req.params.id);
   if (!Number.isInteger(reservaId) || reservaId <= 0) {
@@ -376,6 +395,7 @@ async function listMesasReservationStatusHandler(req, res) {
 
 module.exports = {
   listReservasHandler,
+  listPendingReservasHandler,
   getReservaByIdHandler,
   createReservaHandler,
   updateReservaHandler,

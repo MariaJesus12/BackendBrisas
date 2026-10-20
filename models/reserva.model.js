@@ -24,7 +24,8 @@ function toReserva(row) {
   };
 }
 
-async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta } = {}) {
+async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, fechaHasta, orden = "ASC" } = {}) {
+  const sortDirection = orden === "DESC" ? "DESC" : "ASC";
   const filters = [];
   const params = [];
 
@@ -78,7 +79,7 @@ async function listReservas({ estado, mesaId, clienteId, usuarioId, fechaDesde, 
     LEFT JOIN clientes c ON c.id = r.cliente_id
     INNER JOIN usuarios u ON u.id = r.usuario_id
     ${whereClause}
-    ORDER BY r.fecha_hora ASC, r.id ASC
+    ORDER BY r.fecha_hora ${sortDirection}, r.id ${sortDirection}
     `,
     params,
   );
