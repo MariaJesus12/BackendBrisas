@@ -7,6 +7,7 @@ const {
   findColaImpresionById,
 } = require("../models/impresion.model");
 const {
+  changePedidoMesa,
   countCuentasByPedidoId,
   createCuentaPedido,
   createDetallePedido,
@@ -1661,6 +1662,73 @@ async function updatePedidoHandler(req, res) {
 
   res.json({
     message: "Pedido actualizado exitosamente",
+    pedido: updatedPedido,
+  });
+}
+
+async function changePedidoMesaHandler(req, res) {
+  const pedidoId = Number(req.params.id);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    res.status(400).json({ message: "id de pedido invalido" });
+    return;
+  }
+
+  const nuevaMesaId = Number((req.body || {}).mesaId);
+  if (!Number.isInteger(nuevaMesaId) || nuevaMesaId <= 0) {
+    res.status(400).json({ message: "mesaId es requerido y debe ser un entero positivo" });
+    return;
+  }
+
+  const existingPedido = await findPedidoById(pedidoId);
+  if (!existingPedido) {
+    res.status(404).json({ message: "Pedido no encontrado" });
+    return;
+  }
+
+  const mesa = await findMesaById(nuevaMesaId);
+  if (!mesa || !mesa.activa) {
+    res.status(400).json({ message: "mesaId invalido o mesa inactiva" });
+    return;
+  }
+
+  const activeReserva = await findActiveReservaByMesaAt({
+    mesaId: nuevaMesaId,
+    referenceDateTime: getCurrentCostaRicaDateTimeString(),
+  });
+
+  if (activeReserva) {
+    res.status(409).json({
+      message: "La mesa esta reservada para el horario actual",
+      mesaId: nuevaMesaId,
+      reserva: activeReserva,
+    });
+    return;
+  }
+
+  const result = await changePedidoMesa(pedidoId, nuevaMesaId);
+
+  if (!result.ok) {
+    const errors = {
+      PEDIDO_NOT_FOUND: [404, "Pedido no encontrado"],
+      PEDIDO_NOT_MESA: [409, "Solo se puede cambiar de mesa un pedido de tipo MESA"],
+      PEDIDO_FINALIZADO: [409, "No se puede cambiar de mesa un pedido CERRADO o CANCELADO"],
+      MISMA_MESA: [409, "El pedido ya esta asignado a esa mesa"],
+      MESA_OCUPADA: [409, "La mesa destino ya tiene un pedido activo"],
+    };
+    const [status, message] = errors[result.reason] || [409, "No se pudo cambiar la mesa"];
+    res.status(status).json({
+      message,
+      mesaId: nuevaMesaId,
+      ...(result.pedidoActivo ? { pedidoActivo: result.pedidoActivo } : {}),
+    });
+    return;
+  }
+
+  const updatedPedido = await hydratePedido(pedidoId);
+
+  res.json({
+    message: "Mesa del pedido actualizada exitosamente",
+    mesaAnteriorId: result.mesaAnteriorId,
     pedido: updatedPedido,
   });
 }
@@ -3406,6 +3474,7 @@ module.exports = {
   getPedidoByIdHandler,
   createPedidoHandler,
   updatePedidoHandler,
+  changePedidoMesaHandler,
   deletePedidoHandler,
   listPedidoDetailsHandler,
   createPedidoDetailHandler,

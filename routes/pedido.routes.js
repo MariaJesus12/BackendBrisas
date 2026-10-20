@@ -2,6 +2,7 @@ const express = require("express");
 
 const {
   assignPedidoAccountDetailsHandler,
+  changePedidoMesaHandler,
   createPedidoAccountHandler,
   createPedidoDetailHandler,
   createPedidoHandler,
@@ -44,6 +45,7 @@ pedidoRouter.post("/:id/facturar", facturarPedidoHandler);
 pedidoRouter.post("/:id/reimprimir", reprintPedidoHandler);
 pedidoRouter.post("/:id/reimprimir-cocina", reprintPedidoKitchenHandler);
 pedidoRouter.post("/:id/reimprimir-factura", reprintPedidoFacturaHandler);
+pedidoRouter.put("/:id/mesa", changePedidoMesaHandler);
 pedidoRouter.put("/:id", updatePedidoHandler);
 pedidoRouter.delete("/:id", deletePedidoHandler);
 

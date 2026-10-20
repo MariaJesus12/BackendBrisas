@@ -1352,8 +1352,83 @@ async function listDetalleByCuentaPedidoId(cuentaPedidoId) {
   return rows.map(toDetalle);
 }
 
+const PEDIDO_ESTADOS_FINALES = ["CERRADO", "CANCELADO"];
+
+// Cambia la mesa de forma atomica: bloquea la mesa destino y valida que no tenga otro pedido abierto.
+async function changePedidoMesa(pedidoId, nuevaMesaId) {
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const pedidoRows = await run(
+      "SELECT id, tipo, estado, mesa_id FROM pedidos WHERE id = ? FOR UPDATE",
+      [pedidoId],
+      connection,
+    );
+    const pedido = pedidoRows[0];
+
+    if (!pedido) {
+      await connection.rollback();
+      return { ok: false, reason: "PEDIDO_NOT_FOUND" };
+    }
+
+    if (pedido.tipo !== "MESA" || pedido.mesa_id == null) {
+      await connection.rollback();
+      return { ok: false, reason: "PEDIDO_NOT_MESA" };
+    }
+
+    if (PEDIDO_ESTADOS_FINALES.includes(String(pedido.estado || "").toUpperCase())) {
+      await connection.rollback();
+      return { ok: false, reason: "PEDIDO_FINALIZADO", estado: pedido.estado };
+    }
+
+    if (Number(pedido.mesa_id) === Number(nuevaMesaId)) {
+      await connection.rollback();
+      return { ok: false, reason: "MISMA_MESA" };
+    }
+
+    // Bloquea la mesa destino para serializar cambios concurrentes hacia la misma mesa.
+    await run("SELECT id FROM mesas WHERE id = ? FOR UPDATE", [nuevaMesaId], connection);
+
+    const ocupadaRows = await run(
+      `
+      SELECT id, codigo
+      FROM pedidos
+      WHERE mesa_id = ?
+        AND tipo = 'MESA'
+        AND id <> ?
+        AND UPPER(estado) NOT IN ('CERRADO', 'CANCELADO')
+      LIMIT 1
+      `,
+      [nuevaMesaId, pedidoId],
+      connection,
+    );
+
+    if (ocupadaRows[0]) {
+      await connection.rollback();
+      return {
+        ok: false,
+        reason: "MESA_OCUPADA",
+        pedidoActivo: { id: ocupadaRows[0].id, codigo: ocupadaRows[0].codigo },
+      };
+    }
+
+    await run("UPDATE pedidos SET mesa_id = ? WHERE id = ?", [nuevaMesaId, pedidoId], connection);
+    await connection.commit();
+
+    return { ok: true, mesaAnteriorId: pedido.mesa_id };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 module.exports = {
   pool,
+  changePedidoMesa,
   listPedidos,
   findPedidoById,
   findPedidoByCode,
