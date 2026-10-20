@@ -1398,7 +1398,7 @@ async function changePedidoMesa(pedidoId, nuevaMesaId) {
       WHERE mesa_id = ?
         AND tipo = 'MESA'
         AND id <> ?
-        AND UPPER(estado) NOT IN ('CERRADO', 'CANCELADO')
+        AND UPPER(estado) NOT IN ('FACTURADO', 'CERRADO', 'CANCELADO')
       LIMIT 1
       `,
       [nuevaMesaId, pedidoId],
