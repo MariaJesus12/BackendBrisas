@@ -1914,6 +1914,11 @@ async function updatePedidoDetailHandler(req, res) {
     return;
   }
 
+  if (Number(existingDetail.cantidadEnviadaCocina) > 0 && detalleInput.productoId !== existingDetail.productoId) {
+    res.status(409).json({ message: "No se puede cambiar el producto de un detalle ya enviado a cocina; agrega una nueva linea" });
+    return;
+  }
+
   const product = await findProductById(detalleInput.productoId);
   if (!product || !product.disponible) {
     res.status(400).json({ message: "productoId invalido o producto no disponible" });
@@ -3035,7 +3040,10 @@ async function sendPedidoToKitchenHandler(req, res) {
     // no alcancen a imprimir los mismos productos pendientes.
     await lockPedidoForKitchenDispatch(pedidoId, connection);
     const pedidoState = await findPedidoById(pedidoId, connection);
-    const detallesActuales = await listDetalleByPedidoId(pedidoId, connection);
+    if (!pedidoState || ["CANCELADO", "CERRADO", "FACTURADO"].includes(pedidoState.estado)) {
+      throw appError(409, "El pedido no puede enviarse a cocina en su estado actual");
+    }
+    const detallesActuales = await listDetalleByPedidoId(pedidoId, connection, { forUpdate: true });
     const detallesPendientes = detallesActuales
       .map((detail) => {
         const cantidadPendiente = Number(detail.cantidad) - Number(detail.cantidadEnviadaCocina || 0);

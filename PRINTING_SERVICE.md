@@ -49,6 +49,8 @@ node scripts/print-service.js
 4. Imprime el contenido usando `Out-Printer` de PowerShell al nombre de impresora recibido en `impresoraSistema`.
 5. Marca el resultado como `IMPRESO` o `ERROR`.
 
+El boton de envio a cocina muestra una vista previa y, al confirmar, crea un unico trabajo en la cola. La impresion la realiza este servicio, no el navegador; debe estar ejecutandose para que la comanda salga en la impresora configurada. Los envios posteriores incluyen solamente las unidades pendientes. Es necesario aplicar una sola vez la migracion `scripts/migrations/20260809_comandas_incrementales.sql` antes de usar esta funcion; no se debe volver a ejecutar la actualizacion de datos de esa migracion despues de comenzar a usarla, porque marcaria como enviados productos pendientes.
+
 ## Recomendacion de despliegue
 
 - Ejecuta una instancia para `COCINA` y otra para `FACTURA`.

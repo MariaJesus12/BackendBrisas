@@ -483,8 +483,8 @@ async function deletePedidoCascade(pedidoId, connection) {
   return result.affectedRows;
 }
 
-async function listDetalleByPedidoId(pedidoId, connection) {
-  const schema = await getSchemaCapabilities();
+async function listDetalleByPedidoId(pedidoId, connection, { forUpdate = false } = {}) {
+  const schema = await getSchemaCapabilities(connection);
   const cuentaPedidoColumn = schema.hasDetalleCuentaPedidoId ? "d.cuenta_pedido_id" : "NULL AS cuenta_pedido_id";
   const cantidadEnviadaCocinaColumn = schema.hasDetalleCantidadEnviadaCocina
     ? "d.cantidad_enviada_cocina"
@@ -509,6 +509,7 @@ async function listDetalleByPedidoId(pedidoId, connection) {
     LEFT JOIN productos p ON p.id = d.producto_id
     WHERE d.pedido_id = ?
     ORDER BY d.id ASC
+    ${forUpdate ? "FOR UPDATE" : ""}
     `,
     [pedidoId],
     connection,
@@ -628,6 +629,10 @@ async function updateDetallePedido(
 ) {
   const schema = await getSchemaCapabilities(connection);
   if (!schema.hasDetalleCuentaPedidoId) {
+    const sentSet = schema.hasDetalleCantidadEnviadaCocina
+      ? ", cantidad_enviada_cocina = " + (cantidadEnviadaCocina != null ? "?" : "LEAST(cantidad_enviada_cocina, ?)")
+      : "";
+    const sentParams = schema.hasDetalleCantidadEnviadaCocina ? [cantidadEnviadaCocina ?? cantidad] : [];
     const legacyResult = await run(
       `
       UPDATE detalle_pedido
@@ -636,10 +641,10 @@ async function updateDetallePedido(
         cantidad = ?,
         precio_unitario = ?,
         subtotal = ?,
-        observacion = ?
+        observacion = ?${sentSet}
       WHERE id = ?
       `,
-      [productoId, cantidad, precioUnitario, subtotal, observacion, detalleId],
+      [productoId, cantidad, precioUnitario, subtotal, observacion, ...sentParams, detalleId],
       connection,
     );
 
