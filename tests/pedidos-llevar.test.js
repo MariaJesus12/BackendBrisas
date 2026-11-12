@@ -47,7 +47,8 @@ stubModule("../models/pedido.model", {
 });
 stubModule("../models/impresion.model", {
   findActiveImpresoraByTipo: async () => ({ id: 1, activa: true }),
-  countActiveQueueJobsByPedidoAndTipo: async () => jobs.length,
+  countActiveQueueJobsByPedidoAndTipo: async (pedidoId, tipo) =>
+    jobs.filter((job) => job.pedidoId === pedidoId && job.tipo === tipo).length,
   createColaImpresion: async (job) => {
     jobs.push(job);
     return jobs.length;
@@ -64,6 +65,7 @@ for (const name of ["mesa", "moneda", "cliente", "reserva", "tipo-cambio", "user
 
 const {
   createPedidoDetailHandler,
+  facturarPedidoHandler,
   sendPedidoToKitchenHandler,
   updatePedidoDetailHandler,
 } = require("../controllers/pedido.controller");
@@ -116,4 +118,56 @@ test("pedido para llevar cobra productos nuevos y envia solo cantidades pendient
   res = response();
   await updatePedidoDetailHandler({ params: { id: "1", detailId: "1" }, body: { productoId: 2 } }, res);
   assert.equal(res.statusCode, 409);
+});
+
+test("modo navegador registra solo lo pendiente sin crear una cola para mesa o llevar", async () => {
+  for (const tipo of ["MESA", "LLEVAR"]) {
+    pedido.tipo = tipo;
+    pedido.estado = "BORRADOR";
+    details.length = 0;
+    details.push({ id: 1, productoId: 1, productoNombre: "Cafe", cantidad: 3, cantidadEnviadaCocina: 2 });
+    const jobsBefore = jobs.length;
+    const res = response();
+    await sendPedidoToKitchenHandler({ params: { id: "1" }, body: { metodoImpresion: "NAVEGADOR" }, authUser: { id: 1 } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.metodoImpresion, "NAVEGADOR");
+    assert.equal(res.body.printJob, null);
+    assert.equal(res.body.detallesEnviados[0].cantidad, 1);
+    assert.equal(details[0].cantidadEnviadaCocina, 3);
+    assert.equal(jobs.length, jobsBefore);
+  }
+});
+
+test("rechaza un metodo de impresion invalido antes de registrar productos", async () => {
+  const res = response();
+  await sendPedidoToKitchenHandler({ params: { id: "1" }, body: { metodoImpresion: "incorrecto" }, authUser: { id: 1 } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
+test("facturar desde el navegador no encola otra factura", async () => {
+  for (const tipo of ["MESA", "LLEVAR"]) {
+    pedido.tipo = tipo;
+    pedido.estado = "COCINA";
+    details.length = 0;
+    details.push({ id: 1, productoId: 1, productoNombre: "Cafe", cantidad: 1, cantidadEnviadaCocina: 1, subtotal: 1500 });
+    const jobsBefore = jobs.length;
+    const res = response();
+    await facturarPedidoHandler({ params: { id: "1" }, body: { metodoImpresion: "NAVEGADOR" }, authUser: { id: 1 } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.metodoImpresion, "NAVEGADOR");
+    assert.equal(res.body.printJob, null);
+    assert.equal(pedido.estado, "FACTURADO");
+    assert.equal(jobs.length, jobsBefore);
+  }
+});
+
+test("facturar sin metodo explicito conserva la cola de impresion", async () => {
+  pedido.estado = "COCINA";
+  const jobsBefore = jobs.length;
+  const res = response();
+  await facturarPedidoHandler({ params: { id: "1" }, body: {}, authUser: { id: 1 } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.metodoImpresion, "COLA");
+  assert.equal(jobs.length, jobsBefore + 1);
+  assert.equal(jobs[jobsBefore].tipo, "FACTURA");
 });

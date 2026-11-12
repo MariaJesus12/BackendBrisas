@@ -3017,9 +3017,15 @@ async function sendPedidoToKitchenHandler(req, res) {
   }
 
   const body = req.body || {};
+  const metodoImpresion = body.metodoImpresion ?? "COLA";
   const copias = body.copias == null ? 1 : Number(body.copias);
   const impresoraRaw = body.impresoraId ?? body.impresora_id;
   const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
+
+  if (!["COLA", "NAVEGADOR"].includes(metodoImpresion)) {
+    res.status(400).json({ message: "metodoImpresion invalido" });
+    return;
+  }
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
@@ -3077,7 +3083,7 @@ async function sendPedidoToKitchenHandler(req, res) {
       );
     }
 
-    const jobId = await queuePedidoPrint(
+    const jobId = metodoImpresion === "COLA" ? await queuePedidoPrint(
       {
         pedido: {
           ...pedidoState,
@@ -3095,7 +3101,7 @@ async function sendPedidoToKitchenHandler(req, res) {
         allowPendingJob: true,
       },
       connection,
-    );
+    ) : null;
 
     await markDetallesAsSentToKitchen(
       detallesPendientes.map((detail) => detail.id),
@@ -3105,12 +3111,13 @@ async function sendPedidoToKitchenHandler(req, res) {
     await connection.commit();
 
     const pedido = await hydratePedido(pedidoId);
-    const printJob = await findColaImpresionById(jobId);
+    const printJob = jobId == null ? null : await findColaImpresionById(jobId);
 
     res.json({
       message: "Pedido enviado a cocina exitosamente",
       pedido,
       printJob,
+      metodoImpresion,
       detallesEnviados: detallesPendientes,
     });
   } catch (error) {
@@ -3151,9 +3158,15 @@ async function facturarPedidoHandler(req, res) {
   }
 
   const body = req.body || {};
+  const metodoImpresion = body.metodoImpresion ?? "COLA";
   const copias = body.copias == null ? 1 : Number(body.copias);
   const impresoraRaw = body.impresoraId ?? body.impresora_id;
   const impresoraId = impresoraRaw == null ? undefined : Number(impresoraRaw);
+
+  if (!["COLA", "NAVEGADOR"].includes(metodoImpresion)) {
+    res.status(400).json({ message: "metodoImpresion invalido" });
+    return;
+  }
 
   if (!Number.isInteger(copias) || copias <= 0) {
     res.status(400).json({ message: "copias invalido" });
@@ -3215,7 +3228,7 @@ async function facturarPedidoHandler(req, res) {
       total: totals.total,
     };
 
-    const jobId = await queuePedidoPrint(
+    const jobId = metodoImpresion === "COLA" ? await queuePedidoPrint(
       {
         pedido: pedidoToPrint,
         tipo: "FACTURA",
@@ -3225,17 +3238,18 @@ async function facturarPedidoHandler(req, res) {
         impresoraId,
       },
       connection,
-    );
+    ) : null;
 
     await connection.commit();
 
     const pedido = await hydratePedido(pedidoId);
-    const printJob = await findColaImpresionById(jobId);
+    const printJob = jobId == null ? null : await findColaImpresionById(jobId);
 
     res.json({
-      message: "Pedido facturado y enviado a impresion exitosamente",
+      message: metodoImpresion === "COLA" ? "Pedido facturado y enviado a impresion exitosamente" : "Pedido facturado exitosamente",
       pedido,
       printJob,
+      metodoImpresion,
     });
   } catch (error) {
     await connection.rollback();

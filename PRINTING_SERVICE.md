@@ -49,7 +49,9 @@ node scripts/print-service.js
 4. Imprime el contenido usando `Out-Printer` de PowerShell al nombre de impresora recibido en `impresoraSistema`.
 5. Marca el resultado como `IMPRESO` o `ERROR`.
 
-El boton de envio a cocina muestra una vista previa y, al confirmar, crea un unico trabajo en la cola. La impresion la realiza este servicio, no el navegador; debe estar ejecutandose para que la comanda salga en la impresora configurada. Los envios posteriores incluyen solamente las unidades pendientes. Es necesario aplicar una sola vez la migracion `scripts/migrations/20260809_comandas_incrementales.sql` antes de usar esta funcion; no se debe volver a ejecutar la actualizacion de datos de esa migracion despues de comenzar a usarla, porque marcaria como enviados productos pendientes.
+El envio a cocina acepta `metodoImpresion: "COLA"` (valor predeterminado) o `"NAVEGADOR"`. En modo cola se crea un unico trabajo y este servicio debe estar ejecutandose. En modo navegador se registran los productos enviados sin crear un trabajo, y el frontend abre el selector de impresoras. El navegador no puede confirmar que el usuario haya imprimido, por lo que la vista permite reintentar sin volver a enviar el pedido. Los envios posteriores incluyen solamente las unidades pendientes. Es necesario aplicar una sola vez la migracion `scripts/migrations/20260809_comandas_incrementales.sql` antes de usar esta funcion; no se debe volver a ejecutar la actualizacion de datos de esa migracion despues de comenzar a usarla, porque marcaria como enviados productos pendientes.
+
+El endpoint de facturacion tambien acepta `metodoImpresion: "NAVEGADOR"` para facturar sin crear otra impresion en cola cuando los recibos se imprimen desde el navegador. Si se omite, conserva el comportamiento de cola.
 
 ## Recomendacion de despliegue
 
